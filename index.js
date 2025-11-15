@@ -21,7 +21,7 @@ const storage = multer.memoryStorage();
 const upload = multer({ 
   storage: storage,
   limits: {
-    fileSize: 10 * 1024 * 1024 // 10MB limit
+    fileSize: 10 * 1024 * 1024 // 10MB limit for images
   },
   fileFilter: (req, file, cb) => {
     // Accept images only
@@ -29,6 +29,22 @@ const upload = multer({
       cb(null, true);
     } else {
       cb(new Error('Only image files are allowed!'), false);
+    }
+  }
+});
+
+// Configure multer for video uploads
+const uploadVideo = multer({ 
+  storage: storage,
+  limits: {
+    fileSize: 100 * 1024 * 1024 // 100MB limit for videos
+  },
+  fileFilter: (req, file, cb) => {
+    // Accept videos only
+    if (file.mimetype.startsWith('video/')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only video files are allowed!'), false);
     }
   }
 });
@@ -66,6 +82,8 @@ const postSchema = new mongoose.Schema({
   mediaDescription: { type: String },           // Description for media content
   mediaThumbnail: { type: String },             // Thumbnail URL for media
   uploadedImages: [{ type: String }],           // Array of Cloudinary image URLs
+  uploadedVideo: { type: String },              // Cloudinary video URL
+  uploadedVideoThumbnail: { type: String },     // Custom video thumbnail URL
   postToLinkedIn: { type: Boolean, default: true }, // Whether to post to LinkedIn or just save
   status: { type: String, default: 'pending' } // pending, posted, failed, saved
 }, { timestamps: true });
@@ -433,6 +451,77 @@ app.post('/api/upload-image', upload.single('image'), async (req, res) => {
   }
 });
 
+// ✅ API endpoint to upload video to Cloudinary
+app.post('/api/upload-video', uploadVideo.single('video'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'No video file provided'
+      });
+    }
+
+    console.log('📹 Uploading video to Cloudinary:', {
+      originalname: req.file.originalname,
+      mimetype: req.file.mimetype,
+      size: req.file.size
+    });
+
+    // Upload to Cloudinary using buffer
+    const uploadStream = cloudinary.uploader.upload_stream(
+      {
+        folder: 'linkedin-posts',
+        resource_type: 'video',
+        transformation: [
+          { quality: 'auto' },
+          { fetch_format: 'auto' }
+        ]
+      },
+      (error, result) => {
+        if (error) {
+          console.error('Cloudinary video upload error:', error);
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to upload video to Cloudinary',
+            error: error.message
+          });
+        }
+
+        console.log('✅ Video uploaded successfully to Cloudinary:', result.secure_url);
+
+        res.json({
+          success: true,
+          message: 'Video uploaded successfully',
+          data: {
+            url: result.secure_url,
+            publicId: result.public_id,
+            format: result.format,
+            width: result.width,
+            height: result.height,
+            size: result.bytes,
+            duration: result.duration
+          }
+        });
+      }
+    );
+
+    // Convert buffer to stream and pipe to cloudinary
+    const { Readable } = require('stream');
+    const bufferStream = new Readable();
+    bufferStream.push(req.file.buffer);
+    bufferStream.push(null);
+    bufferStream.pipe(uploadStream);
+
+  } catch (error) {
+    console.error('Error uploading video:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to upload video',
+      error: error.message
+    });
+  }
+});
+
 // ✅ API endpoint to get LinkedIn user info
 app.get('/api/linkedin-userinfo', async (req, res) => {
   try {
@@ -463,6 +552,8 @@ app.post('/api/post-to-linkedin', async (req, res) => {
       mediaDescription = '', 
       mediaThumbnail = '',
       uploadedImages = [],
+      uploadedVideo = '',
+      uploadedVideoThumbnail = '',
       postToLinkedIn: shouldPostToLinkedIn = true
     } = req.body;
 
@@ -472,6 +563,8 @@ app.post('/api/post-to-linkedin', async (req, res) => {
       mediaType,
       mediaUrl,
       uploadedImages: uploadedImages.length,
+      uploadedVideo: uploadedVideo ? 'present' : 'none',
+      uploadedVideoThumbnail: uploadedVideoThumbnail ? 'present' : 'none',
       postToLinkedIn: shouldPostToLinkedIn
     });
 
@@ -494,6 +587,8 @@ app.post('/api/post-to-linkedin', async (req, res) => {
       mediaDescription: mediaDescription,
       mediaThumbnail: mediaThumbnail,
       uploadedImages: uploadedImages,
+      uploadedVideo: uploadedVideo,
+      uploadedVideoThumbnail: uploadedVideoThumbnail,
       postToLinkedIn: shouldPostToLinkedIn,
       status: shouldPostToLinkedIn ? 'pending' : 'saved'
     });
@@ -522,10 +617,10 @@ app.post('/api/post-to-linkedin', async (req, res) => {
       const linkedinResponse = await postToLinkedIn(content, {
         title,
         mediaType,
-        mediaUrl,
+        mediaUrl: uploadedVideo || mediaUrl, // Use uploadedVideo if available, otherwise use mediaUrl
         mediaTitle,
         mediaDescription,
-        mediaThumbnail,
+        mediaThumbnail: uploadedVideoThumbnail || mediaThumbnail, // Use uploadedVideoThumbnail if available
         uploadedImages
       });
       
@@ -587,7 +682,9 @@ app.post('/api/save-post', async (req, res) => {
       mediaTitle = '', 
       mediaDescription = '', 
       mediaThumbnail = '',
-      uploadedImages = []
+      uploadedImages = [],
+      uploadedVideo = '',
+      uploadedVideoThumbnail = ''
     } = req.body;
 
     if (!content) {
@@ -607,6 +704,8 @@ app.post('/api/save-post', async (req, res) => {
       mediaDescription: mediaDescription,
       mediaThumbnail: mediaThumbnail,
       uploadedImages: uploadedImages,
+      uploadedVideo: uploadedVideo,
+      uploadedVideoThumbnail: uploadedVideoThumbnail,
       postToLinkedIn: false,
       status: 'saved'
     });
@@ -620,6 +719,8 @@ app.post('/api/save-post', async (req, res) => {
         postId: newPost._id,
         content: content,
         uploadedImages: uploadedImages,
+        uploadedVideo: uploadedVideo,
+        uploadedVideoThumbnail: uploadedVideoThumbnail,
         status: 'saved'
       }
     });
