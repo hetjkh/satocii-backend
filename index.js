@@ -82,7 +82,7 @@ const postSchema = new mongoose.Schema({
   mediaDescription: { type: String },           // Description for media content
   mediaThumbnail: { type: String },             // Thumbnail URL for media
   uploadedImages: [{ type: String }],           // Array of Cloudinary image URLs
-  uploadedVideo: { type: String },              // Cloudinary video URL
+  uploadedVideo: { type: String },              // LinkedIn asset URN (for videos uploaded directly)
   uploadedVideoThumbnail: { type: String },     // Custom video thumbnail URL
   postToLinkedIn: { type: Boolean, default: true }, // Whether to post to LinkedIn or just save
   status: { type: String, default: 'pending' } // pending, posted, failed, saved
@@ -176,10 +176,10 @@ async function uploadImageToLinkedIn(imageUrl, userInfo) {
     console.log('📥 Downloaded image from Cloudinary, size:', imageBuffer.length, 'bytes');
 
     // Step 3: Upload the image binary to LinkedIn
-    await axios.put(uploadUrl, imageBuffer, {
+    await axios.put(uploadUrl, imageBuffer, { 
       headers: {
-        'Authorization': `Bearer ${LINKEDIN_CONFIG.accessToken}`,
-        'Content-Type': 'application/octet-stream'
+        'Authorization': `Bearer ${LINKEDIN_CONFIG.accessToken}`
+        // Don't set Content-Type for binary uploads, let axios/LinkedIn handle it
       },
       maxBodyLength: Infinity,
       maxContentLength: Infinity
@@ -194,11 +194,11 @@ async function uploadImageToLinkedIn(imageUrl, userInfo) {
   }
 }
 
-// Upload video to LinkedIn and get media URN
-async function uploadVideoToLinkedIn(videoUrl, userInfo, thumbnailUrl = null) {
+// Upload video to LinkedIn and get media URN (accepts file buffer directly)
+async function uploadVideoToLinkedIn(videoBuffer, userInfo) {
   try {
-    console.log('🎥 Uploading video to LinkedIn:', videoUrl);
-    console.log('🖼️ Thumbnail URL:', thumbnailUrl || 'none');
+    console.log('🎥 Uploading video to LinkedIn directly from buffer');
+    console.log('📦 Video buffer size:', videoBuffer.length, 'bytes');
     
     const personUrn = `urn:li:person:${userInfo.sub}`;
     
@@ -226,26 +226,38 @@ async function uploadVideoToLinkedIn(videoUrl, userInfo, thumbnailUrl = null) {
       }
     );
 
-    const uploadUrl = registerUploadResponse.data.value.uploadMechanism['com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest'].uploadUrl;
-    const asset = registerUploadResponse.data.value.asset;
+    // Extract upload URL and asset from response
+    const uploadMechanism = registerUploadResponse.data.value.uploadMechanism;
+    if (!uploadMechanism || !uploadMechanism['com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest']) {
+      throw new Error('Invalid response from LinkedIn: missing upload mechanism');
+    }
+    
+    const uploadUrl = uploadMechanism['com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest'].uploadUrl;
+    let asset = registerUploadResponse.data.value.asset;
+
+    if (!uploadUrl || !asset) {
+      console.error('❌ Invalid LinkedIn response:', JSON.stringify(registerUploadResponse.data, null, 2));
+      throw new Error('Invalid response from LinkedIn: missing uploadUrl or asset');
+    }
+
+    // Ensure asset is a string (URN format: urn:li:digitalmediaAsset:...)
+    if (typeof asset !== 'string') {
+      console.error('❌ Asset is not a string:', asset, typeof asset);
+      console.error('❌ Full response:', JSON.stringify(registerUploadResponse.data, null, 2));
+      throw new Error('Invalid asset format from LinkedIn: expected string URN');
+    }
+
+    // Verify asset URN format
+    if (!asset.startsWith('urn:li:digitalmediaAsset:')) {
+      console.error('❌ Invalid asset URN format:', asset);
+      throw new Error(`Invalid asset URN format: ${asset}. Expected format: urn:li:digitalmediaAsset:...`);
+    }
 
     console.log('✅ Video upload registered. Asset URN:', asset);
     console.log('📤 Upload URL:', uploadUrl);
 
-    // Step 2: Download video from Cloudinary
-    console.log('📥 Downloading video from Cloudinary...');
-    const videoResponse = await axios.get(videoUrl, { 
-      responseType: 'arraybuffer',
-      maxBodyLength: Infinity,
-      maxContentLength: Infinity
-    });
-    const videoBuffer = Buffer.from(videoResponse.data);
-
-    console.log('📥 Downloaded video from Cloudinary, size:', videoBuffer.length, 'bytes');
-
-    // Step 3: Upload the video binary to LinkedIn
-    // LinkedIn uses PUT for binary file uploads (curl --upload-file uses PUT)
-    console.log('📤 Uploading video to LinkedIn...');
+    // Step 2: Upload the video binary directly to LinkedIn
+    console.log('📤 Uploading video binary to LinkedIn...');
     const uploadResponse = await axios.put(uploadUrl, videoBuffer, {
       headers: {
         'Authorization': `Bearer ${LINKEDIN_CONFIG.accessToken}`
@@ -259,6 +271,19 @@ async function uploadVideoToLinkedIn(videoUrl, userInfo, thumbnailUrl = null) {
     console.log('✅ Video uploaded to LinkedIn successfully');
     console.log('📦 Upload response status:', uploadResponse.status);
 
+    // According to LinkedIn docs, after successful upload we can use the asset immediately
+    // However, for large videos, LinkedIn might need a moment to process
+    // Let's add a small delay for videos over 10MB
+    if (videoBuffer.length > 10 * 1024 * 1024) {
+      console.log('⏳ Large video detected, waiting 2 seconds for LinkedIn to process...');
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+
+    if (!asset) {
+      throw new Error('No asset URN received from LinkedIn upload registration');
+    }
+
+    console.log('✅ Returning asset URN:', asset);
     return asset; // Return the asset URN
   } catch (error) {
     console.error('❌ Error uploading video to LinkedIn:');
@@ -318,31 +343,27 @@ async function postToLinkedIn(content, options = {}) {
       }
     };
 
-    // Handle video uploads first (videos must be uploaded to LinkedIn directly)
-    if (mediaType === 'VIDEO' && mediaUrl) {
-      console.log('🎥 Processing video post to LinkedIn...');
+    // Handle video uploads - videos should already be uploaded and asset URN provided
+    if (mediaType === 'VIDEO' && options.uploadedVideoAssetUrn) {
+      console.log('🎥 Processing video post to LinkedIn with asset URN...');
       
-      try {
-        // Upload video to LinkedIn and get media URN
-        const assetUrn = await uploadVideoToLinkedIn(mediaUrl, userInfo, mediaThumbnail);
-        
-        // Use the video asset URN in the post
-        postData.specificContent['com.linkedin.ugc.ShareContent'].media = [{
-          status: 'READY',
-          description: {
-            text: mediaDescription || content
-          },
-          media: assetUrn,
-          title: {
-            text: mediaTitle || title || 'Video Post'
-          }
-        }];
+      // Use the video asset URN directly (video was already uploaded)
+      postData.specificContent['com.linkedin.ugc.ShareContent'].media = [{
+        status: 'READY',
+        description: {
+          text: mediaDescription || content
+        },
+        media: options.uploadedVideoAssetUrn, // Asset URN from previous upload
+        title: {
+          text: mediaTitle || title || 'Video Post'
+        }
+      }];
 
-        console.log('✅ Video media added to post');
-      } catch (videoError) {
-        console.error('❌ Failed to upload video to LinkedIn:', videoError);
-        throw new Error(`Failed to upload video to LinkedIn: ${videoError.message}`);
-      }
+      // Ensure shareMediaCategory is set to VIDEO
+      postData.specificContent['com.linkedin.ugc.ShareContent'].shareMediaCategory = 'VIDEO';
+
+      console.log('✅ Video media added to post');
+      console.log('📦 Asset URN:', options.uploadedVideoAssetUrn);
     }
     // Add uploaded images if available
     else if (hasUploadedImages) {
@@ -401,16 +422,29 @@ async function postToLinkedIn(content, options = {}) {
     console.log('   - Post Data:', JSON.stringify(postData, null, 2));
 
     // Post to LinkedIn using the UGC Posts API
+    // According to docs: POST https://api.linkedin.com/v2/ugcPosts
+    // Response should be 201 Created with X-RestLi-Id header
+    console.log('📤 Final post data being sent:', JSON.stringify(postData, null, 2));
+    
     const response = await axios.post('https://api.linkedin.com/v2/ugcPosts', postData, {
       headers: {
         'Authorization': `Bearer ${LINKEDIN_CONFIG.accessToken}`,
         'Content-Type': 'application/json',
         'X-Restli-Protocol-Version': '2.0.0'
-      }
+      },
+      validateStatus: (status) => status >= 200 && status < 300 // Accept 200-299 as success
     });
 
     console.log('✅ LinkedIn post response status:', response.status);
+    console.log('📦 Response status text:', response.statusText);
     console.log('📦 Response headers:', JSON.stringify(response.headers, null, 2));
+    console.log('📦 Response data:', JSON.stringify(response.data, null, 2));
+    
+    // Check for X-RestLi-Id header (post ID)
+    const postId = response.headers['x-restli-id'] || response.headers['X-RestLi-Id'] || response.data?.id;
+    if (postId) {
+      console.log('✅ Post ID from LinkedIn:', postId);
+    }
 
     return {
       ...response.data,
@@ -582,7 +616,7 @@ app.post('/api/upload-image', upload.single('image'), async (req, res) => {
   }
 });
 
-// ✅ API endpoint to upload video to Cloudinary
+// ✅ API endpoint to upload video directly to LinkedIn
 app.post('/api/upload-video', (req, res, next) => {
   uploadVideo.single('video')(req, res, (err) => {
     if (err) {
@@ -596,8 +630,8 @@ app.post('/api/upload-video', (req, res, next) => {
   });
 }, async (req, res) => {
   try {
-    console.log('📹 Video upload endpoint hit');
-    console.log('📦 Request body:', req.body);
+    console.log('🚀 NEW VIDEO UPLOAD FLOW - Uploading directly to LinkedIn (NOT Cloudinary)');
+    console.log('📹 Video upload endpoint hit - uploading directly to LinkedIn');
     console.log('📁 Request file:', req.file ? {
       originalname: req.file.originalname,
       mimetype: req.file.mimetype,
@@ -613,116 +647,49 @@ app.post('/api/upload-video', (req, res, next) => {
       });
     }
 
-    console.log('📹 Uploading video to Cloudinary:', {
+    if (!req.file.buffer) {
+      console.error('❌ No buffer in file');
+      return res.status(400).json({
+        success: false,
+        message: 'File buffer is missing'
+      });
+    }
+
+    console.log('📹 Uploading video directly to LinkedIn:', {
       originalname: req.file.originalname,
       mimetype: req.file.mimetype,
       size: req.file.size
     });
 
-    // Upload to Cloudinary using buffer
-    // For large videos, don't apply transformations during upload
-    // Cloudinary will process them asynchronously
-    const uploadOptions = {
-      folder: 'linkedin-posts',
-      resource_type: 'video',
-      // Remove transformations for large videos - they cause sync processing issues
-      // Cloudinary will serve the video as-is, which is fine for our use case
-    };
-
-    // Only add transformations for smaller videos
-    if (req.file.size < 50 * 1024 * 1024) { // Less than 50MB
-      uploadOptions.transformation = [
-        { quality: 'auto' },
-        { fetch_format: 'auto' }
-      ];
-    }
-
-    const uploadStream = cloudinary.uploader.upload_stream(
-      uploadOptions,
-      (error, result) => {
-        // Check if response was already sent
-        if (res.headersSent) {
-          console.error('⚠️ Response already sent, skipping');
-          return;
-        }
-
-        if (error) {
-          console.error('❌ Cloudinary video upload error:', error);
-          return res.status(500).json({
-            success: false,
-            message: 'Failed to upload video to Cloudinary',
-            error: error.message
-          });
-        }
-
-        if (!result || !result.secure_url) {
-          console.error('❌ Cloudinary result is invalid:', result);
-          return res.status(500).json({
-            success: false,
-            message: 'Invalid response from Cloudinary',
-            error: 'No secure_url in result'
-          });
-        }
-
-        console.log('✅ Video uploaded successfully to Cloudinary:', result.secure_url);
-        console.log('📦 Cloudinary result:', JSON.stringify(result, null, 2));
-
-        // For large videos, Cloudinary might return the URL immediately even if processing is async
-        // The URL will still work, but might be in processing state
-        res.json({
-          success: true,
-          message: 'Video uploaded successfully',
-          data: {
-            url: result.secure_url,
-            publicId: result.public_id,
-            format: result.format,
-            width: result.width,
-            height: result.height,
-            size: result.bytes,
-            duration: result.duration
-          }
-        });
-      }
-    );
-
-    // Convert buffer to stream and pipe to cloudinary
-    const { Readable } = require('stream');
-    const bufferStream = new Readable();
-    bufferStream.push(req.file.buffer);
-    bufferStream.push(null);
+    // Get user info to get the user ID
+    const userInfo = await getLinkedInUserInfo();
     
-    // Handle stream errors
-    bufferStream.on('error', (err) => {
-      console.error('❌ Stream error:', err);
-      if (!res.headersSent) {
-        res.status(500).json({
-          success: false,
-          message: 'Stream error',
-          error: err.message
-        });
+    // Upload video directly to LinkedIn and get asset URN
+    const videoBuffer = Buffer.from(req.file.buffer);
+    const assetUrn = await uploadVideoToLinkedIn(videoBuffer, userInfo);
+
+    console.log('✅ Video uploaded successfully to LinkedIn');
+    console.log('📦 Asset URN:', assetUrn);
+
+    // Return the asset URN instead of a URL
+    res.json({
+      success: true,
+      message: 'Video uploaded successfully to LinkedIn',
+      data: {
+        assetUrn: assetUrn,
+        size: req.file.size,
+        mimetype: req.file.mimetype,
+        originalname: req.file.originalname
       }
     });
-
-    uploadStream.on('error', (err) => {
-      console.error('❌ Upload stream error:', err);
-      if (!res.headersSent) {
-        res.status(500).json({
-          success: false,
-          message: 'Upload stream error',
-          error: err.message
-        });
-      }
-    });
-
-    bufferStream.pipe(uploadStream);
 
   } catch (error) {
-    console.error('❌ Error uploading video:', error);
+    console.error('❌ Error uploading video to LinkedIn:', error);
     // Make sure we haven't already sent a response
     if (!res.headersSent) {
       res.status(500).json({
         success: false,
-        message: 'Failed to upload video',
+        message: 'Failed to upload video to LinkedIn',
         error: error.message
       });
     }
@@ -826,13 +793,24 @@ app.post('/api/post-to-linkedin', async (req, res) => {
       let effectiveMediaType = mediaType;
       let effectiveMediaUrl = mediaUrl;
       let effectiveMediaThumbnail = mediaThumbnail;
+      let uploadedVideoAssetUrn = null;
       
-      // If we have an uploaded video, prioritize it and set media type to VIDEO
+      // If we have an uploaded video, it should be an asset URN (not a URL)
+      // Check if uploadedVideo is an asset URN (starts with urn:li:digitalmediaAsset:)
       if (uploadedVideo) {
-        effectiveMediaType = 'VIDEO';
-        effectiveMediaUrl = uploadedVideo;
-        effectiveMediaThumbnail = uploadedVideoThumbnail || mediaThumbnail;
-        console.log('📹 Using uploaded video for LinkedIn post');
+        if (uploadedVideo.startsWith('urn:li:digitalmediaAsset:')) {
+          // It's already an asset URN from direct LinkedIn upload
+          effectiveMediaType = 'VIDEO';
+          uploadedVideoAssetUrn = uploadedVideo;
+          effectiveMediaThumbnail = uploadedVideoThumbnail || mediaThumbnail;
+          console.log('📹 Using uploaded video asset URN for LinkedIn post');
+        } else {
+          // Legacy: It's a URL (shouldn't happen with new flow, but handle gracefully)
+          console.warn('⚠️ Uploaded video is a URL, not an asset URN. This should not happen with direct LinkedIn upload.');
+          effectiveMediaType = 'VIDEO';
+          effectiveMediaUrl = uploadedVideo;
+          effectiveMediaThumbnail = uploadedVideoThumbnail || mediaThumbnail;
+        }
       }
       
       const linkedinResponse = await postToLinkedIn(content, {
@@ -842,7 +820,8 @@ app.post('/api/post-to-linkedin', async (req, res) => {
         mediaTitle,
         mediaDescription,
         mediaThumbnail: effectiveMediaThumbnail,
-        uploadedImages
+        uploadedImages,
+        uploadedVideoAssetUrn: uploadedVideoAssetUrn
       });
       
       // Update post record with LinkedIn post ID and user ID
@@ -872,21 +851,53 @@ app.post('/api/post-to-linkedin', async (req, res) => {
       newPost.status = 'failed';
       await newPost.save();
 
-      console.error('❌ LinkedIn posting failed:', linkedinError.response?.data || linkedinError.message);
+      console.error('❌ LinkedIn posting failed:');
+      console.error('   - Error message:', linkedinError.message);
+      console.error('   - Error stack:', linkedinError.stack);
+      console.error('   - Status code:', linkedinError.response?.status);
+      console.error('   - Response data:', JSON.stringify(linkedinError.response?.data, null, 2));
+      console.error('   - Full error:', linkedinError);
+
+      // Provide more helpful error messages
+      let errorMessage = 'Failed to post to LinkedIn';
+      if (linkedinError.response?.data) {
+        if (typeof linkedinError.response.data === 'string') {
+          errorMessage = linkedinError.response.data;
+        } else if (linkedinError.response.data.message) {
+          errorMessage = linkedinError.response.data.message;
+        } else {
+          errorMessage = JSON.stringify(linkedinError.response.data);
+        }
+      } else if (linkedinError.message) {
+        errorMessage = linkedinError.message;
+      }
 
       res.status(500).json({
         success: false,
-        message: 'Failed to post to LinkedIn',
+        message: errorMessage,
         error: linkedinError.response?.data || linkedinError.message,
         postId: newPost._id
       });
     }
 
   } catch (error) {
-    console.error('Error in post-to-linkedin endpoint:', error);
+    console.error('❌ Error in post-to-linkedin endpoint:');
+    console.error('   - Error message:', error.message);
+    console.error('   - Error stack:', error.stack);
+    
+    // Check if we already saved a post
+    if (newPost && newPost._id) {
+      try {
+        newPost.status = 'failed';
+        await newPost.save();
+      } catch (saveError) {
+        console.error('❌ Failed to update post status:', saveError);
+      }
+    }
+
     res.status(500).json({
       success: false,
-      message: 'Internal server error',
+      message: error.message || 'Internal server error',
       error: error.message
     });
   }
