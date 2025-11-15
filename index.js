@@ -194,6 +194,92 @@ async function uploadImageToLinkedIn(imageUrl, userInfo) {
   }
 }
 
+// Upload video to LinkedIn and get media URN
+async function uploadVideoToLinkedIn(videoUrl, userInfo, thumbnailUrl = null) {
+  try {
+    console.log('🎥 Uploading video to LinkedIn:', videoUrl);
+    console.log('🖼️ Thumbnail URL:', thumbnailUrl || 'none');
+    
+    const personUrn = `urn:li:person:${userInfo.sub}`;
+    
+    // Step 1: Register the upload for video
+    const registerUploadResponse = await axios.post(
+      'https://api.linkedin.com/v2/assets?action=registerUpload',
+      {
+        registerUploadRequest: {
+          recipes: ['urn:li:digitalmediaRecipe:feedshare-video'],
+          owner: personUrn,
+          serviceRelationships: [
+            {
+              relationshipType: 'OWNER',
+              identifier: 'urn:li:userGeneratedContent'
+            }
+          ]
+        }
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${LINKEDIN_CONFIG.accessToken}`,
+          'Content-Type': 'application/json',
+          'X-Restli-Protocol-Version': '2.0.0'
+        }
+      }
+    );
+
+    const uploadUrl = registerUploadResponse.data.value.uploadMechanism['com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest'].uploadUrl;
+    const asset = registerUploadResponse.data.value.asset;
+
+    console.log('✅ Video upload registered. Asset URN:', asset);
+    console.log('📤 Upload URL:', uploadUrl);
+
+    // Step 2: Download video from Cloudinary
+    console.log('📥 Downloading video from Cloudinary...');
+    const videoResponse = await axios.get(videoUrl, { 
+      responseType: 'arraybuffer',
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity
+    });
+    const videoBuffer = Buffer.from(videoResponse.data);
+
+    console.log('📥 Downloaded video from Cloudinary, size:', videoBuffer.length, 'bytes');
+
+    // Step 3: Upload the video binary to LinkedIn
+    // LinkedIn uses PUT for binary file uploads (curl --upload-file uses PUT)
+    console.log('📤 Uploading video to LinkedIn...');
+    const uploadResponse = await axios.put(uploadUrl, videoBuffer, {
+      headers: {
+        'Authorization': `Bearer ${LINKEDIN_CONFIG.accessToken}`
+        // Don't set Content-Type for binary uploads, let axios/LinkedIn handle it
+      },
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
+      timeout: 300000 // 5 minutes timeout for large videos
+    });
+
+    console.log('✅ Video uploaded to LinkedIn successfully');
+    console.log('📦 Upload response status:', uploadResponse.status);
+
+    return asset; // Return the asset URN
+  } catch (error) {
+    console.error('❌ Error uploading video to LinkedIn:');
+    console.error('   - Error message:', error.message);
+    console.error('   - Status code:', error.response?.status);
+    console.error('   - Response data:', JSON.stringify(error.response?.data, null, 2));
+    console.error('   - Full error:', error);
+    
+    // Provide more helpful error messages
+    if (error.response?.status === 401) {
+      throw new Error('LinkedIn authentication failed. Please check your access token and ensure it has w_member_social permission.');
+    } else if (error.response?.status === 403) {
+      throw new Error('LinkedIn permission denied. Your app needs w_member_social permission to post videos.');
+    } else if (error.response?.status === 413) {
+      throw new Error('Video file too large. LinkedIn supports videos up to 5GB.');
+    }
+    
+    throw error;
+  }
+}
+
 async function postToLinkedIn(content, options = {}) {
   try {
     const { 
@@ -212,7 +298,8 @@ async function postToLinkedIn(content, options = {}) {
 
     // Determine if we have images to post
     const hasUploadedImages = uploadedImages && uploadedImages.length > 0;
-    const effectiveMediaType = hasUploadedImages ? 'IMAGE' : mediaType;
+    // If mediaType is VIDEO, keep it as VIDEO, otherwise use IMAGE if we have images
+    const effectiveMediaType = mediaType === 'VIDEO' ? 'VIDEO' : (hasUploadedImages ? 'IMAGE' : mediaType);
 
     // Build the post data
     const postData = {
@@ -231,8 +318,34 @@ async function postToLinkedIn(content, options = {}) {
       }
     };
 
+    // Handle video uploads first (videos must be uploaded to LinkedIn directly)
+    if (mediaType === 'VIDEO' && mediaUrl) {
+      console.log('🎥 Processing video post to LinkedIn...');
+      
+      try {
+        // Upload video to LinkedIn and get media URN
+        const assetUrn = await uploadVideoToLinkedIn(mediaUrl, userInfo, mediaThumbnail);
+        
+        // Use the video asset URN in the post
+        postData.specificContent['com.linkedin.ugc.ShareContent'].media = [{
+          status: 'READY',
+          description: {
+            text: mediaDescription || content
+          },
+          media: assetUrn,
+          title: {
+            text: mediaTitle || title || 'Video Post'
+          }
+        }];
+
+        console.log('✅ Video media added to post');
+      } catch (videoError) {
+        console.error('❌ Failed to upload video to LinkedIn:', videoError);
+        throw new Error(`Failed to upload video to LinkedIn: ${videoError.message}`);
+      }
+    }
     // Add uploaded images if available
-    if (hasUploadedImages) {
+    else if (hasUploadedImages) {
       console.log(`🔄 Uploading ${uploadedImages.length} image(s) to LinkedIn...`);
       
       // Upload each image to LinkedIn and get media URNs
@@ -260,8 +373,8 @@ async function postToLinkedIn(content, options = {}) {
         }
       }));
     }
-    // Add media URL if provided (for ARTICLE or VIDEO)
-    else if (mediaType !== 'NONE' && mediaUrl) {
+    // Add media URL if provided (for ARTICLE only - videos are handled above)
+    else if (mediaType === 'ARTICLE' && mediaUrl) {
       postData.specificContent['com.linkedin.ugc.ShareContent'].media = [{
         status: 'READY',
         description: {
@@ -284,6 +397,7 @@ async function postToLinkedIn(content, options = {}) {
     console.log('📤 Posting to LinkedIn:');
     console.log('   - Media Category:', effectiveMediaType);
     console.log('   - Uploaded Images:', uploadedImages.length);
+    console.log('   - Has Video:', mediaType === 'VIDEO');
     console.log('   - Post Data:', JSON.stringify(postData, null, 2));
 
     // Post to LinkedIn using the UGC Posts API
@@ -295,12 +409,29 @@ async function postToLinkedIn(content, options = {}) {
       }
     });
 
+    console.log('✅ LinkedIn post response status:', response.status);
+    console.log('📦 Response headers:', JSON.stringify(response.headers, null, 2));
+
     return {
       ...response.data,
-      userInfo: userInfo
+      userInfo: userInfo,
+      postId: response.headers['x-restli-id'] || response.data.id
     };
   } catch (error) {
-    console.error('Error posting to LinkedIn:', error.response?.data || error.message);
+    console.error('❌ Error posting to LinkedIn:');
+    console.error('   - Error message:', error.message);
+    console.error('   - Status code:', error.response?.status);
+    console.error('   - Response data:', JSON.stringify(error.response?.data, null, 2));
+    
+    // Provide more helpful error messages
+    if (error.response?.status === 401) {
+      throw new Error('LinkedIn authentication failed. Please check your access token.');
+    } else if (error.response?.status === 403) {
+      throw new Error('LinkedIn permission denied. Your app needs w_member_social permission.');
+    } else if (error.response?.status === 400) {
+      throw new Error(`LinkedIn API error: ${JSON.stringify(error.response?.data)}`);
+    }
+    
     throw error;
   }
 }
@@ -690,13 +821,27 @@ app.post('/api/post-to-linkedin', async (req, res) => {
     try {
       // Post to LinkedIn
       console.log('🚀 Attempting to post to LinkedIn...');
+      
+      // Determine the actual media type and URL
+      let effectiveMediaType = mediaType;
+      let effectiveMediaUrl = mediaUrl;
+      let effectiveMediaThumbnail = mediaThumbnail;
+      
+      // If we have an uploaded video, prioritize it and set media type to VIDEO
+      if (uploadedVideo) {
+        effectiveMediaType = 'VIDEO';
+        effectiveMediaUrl = uploadedVideo;
+        effectiveMediaThumbnail = uploadedVideoThumbnail || mediaThumbnail;
+        console.log('📹 Using uploaded video for LinkedIn post');
+      }
+      
       const linkedinResponse = await postToLinkedIn(content, {
         title,
-        mediaType,
-        mediaUrl: uploadedVideo || mediaUrl, // Use uploadedVideo if available, otherwise use mediaUrl
+        mediaType: effectiveMediaType,
+        mediaUrl: effectiveMediaUrl,
         mediaTitle,
         mediaDescription,
-        mediaThumbnail: uploadedVideoThumbnail || mediaThumbnail, // Use uploadedVideoThumbnail if available
+        mediaThumbnail: effectiveMediaThumbnail,
         uploadedImages
       });
       
