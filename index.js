@@ -452,9 +452,30 @@ app.post('/api/upload-image', upload.single('image'), async (req, res) => {
 });
 
 // ✅ API endpoint to upload video to Cloudinary
-app.post('/api/upload-video', uploadVideo.single('video'), async (req, res) => {
+app.post('/api/upload-video', (req, res, next) => {
+  uploadVideo.single('video')(req, res, (err) => {
+    if (err) {
+      console.error('❌ Multer error:', err.message);
+      return res.status(400).json({
+        success: false,
+        message: err.message || 'File upload error'
+      });
+    }
+    next();
+  });
+}, async (req, res) => {
   try {
+    console.log('📹 Video upload endpoint hit');
+    console.log('📦 Request body:', req.body);
+    console.log('📁 Request file:', req.file ? {
+      originalname: req.file.originalname,
+      mimetype: req.file.mimetype,
+      size: req.file.size,
+      buffer: req.file.buffer ? `${req.file.buffer.length} bytes` : 'no buffer'
+    } : 'No file');
+
     if (!req.file) {
+      console.error('❌ No file in request');
       return res.status(400).json({
         success: false,
         message: 'No video file provided'
@@ -468,18 +489,34 @@ app.post('/api/upload-video', uploadVideo.single('video'), async (req, res) => {
     });
 
     // Upload to Cloudinary using buffer
+    // For large videos, don't apply transformations during upload
+    // Cloudinary will process them asynchronously
+    const uploadOptions = {
+      folder: 'linkedin-posts',
+      resource_type: 'video',
+      // Remove transformations for large videos - they cause sync processing issues
+      // Cloudinary will serve the video as-is, which is fine for our use case
+    };
+
+    // Only add transformations for smaller videos
+    if (req.file.size < 50 * 1024 * 1024) { // Less than 50MB
+      uploadOptions.transformation = [
+        { quality: 'auto' },
+        { fetch_format: 'auto' }
+      ];
+    }
+
     const uploadStream = cloudinary.uploader.upload_stream(
-      {
-        folder: 'linkedin-posts',
-        resource_type: 'video',
-        transformation: [
-          { quality: 'auto' },
-          { fetch_format: 'auto' }
-        ]
-      },
+      uploadOptions,
       (error, result) => {
+        // Check if response was already sent
+        if (res.headersSent) {
+          console.error('⚠️ Response already sent, skipping');
+          return;
+        }
+
         if (error) {
-          console.error('Cloudinary video upload error:', error);
+          console.error('❌ Cloudinary video upload error:', error);
           return res.status(500).json({
             success: false,
             message: 'Failed to upload video to Cloudinary',
@@ -487,8 +524,20 @@ app.post('/api/upload-video', uploadVideo.single('video'), async (req, res) => {
           });
         }
 
-        console.log('✅ Video uploaded successfully to Cloudinary:', result.secure_url);
+        if (!result || !result.secure_url) {
+          console.error('❌ Cloudinary result is invalid:', result);
+          return res.status(500).json({
+            success: false,
+            message: 'Invalid response from Cloudinary',
+            error: 'No secure_url in result'
+          });
+        }
 
+        console.log('✅ Video uploaded successfully to Cloudinary:', result.secure_url);
+        console.log('📦 Cloudinary result:', JSON.stringify(result, null, 2));
+
+        // For large videos, Cloudinary might return the URL immediately even if processing is async
+        // The URL will still work, but might be in processing state
         res.json({
           success: true,
           message: 'Video uploaded successfully',
@@ -510,15 +559,42 @@ app.post('/api/upload-video', uploadVideo.single('video'), async (req, res) => {
     const bufferStream = new Readable();
     bufferStream.push(req.file.buffer);
     bufferStream.push(null);
+    
+    // Handle stream errors
+    bufferStream.on('error', (err) => {
+      console.error('❌ Stream error:', err);
+      if (!res.headersSent) {
+        res.status(500).json({
+          success: false,
+          message: 'Stream error',
+          error: err.message
+        });
+      }
+    });
+
+    uploadStream.on('error', (err) => {
+      console.error('❌ Upload stream error:', err);
+      if (!res.headersSent) {
+        res.status(500).json({
+          success: false,
+          message: 'Upload stream error',
+          error: err.message
+        });
+      }
+    });
+
     bufferStream.pipe(uploadStream);
 
   } catch (error) {
-    console.error('Error uploading video:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to upload video',
-      error: error.message
-    });
+    console.error('❌ Error uploading video:', error);
+    // Make sure we haven't already sent a response
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        message: 'Failed to upload video',
+        error: error.message
+      });
+    }
   }
 });
 
