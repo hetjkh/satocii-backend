@@ -703,13 +703,48 @@ app.post('/api/submit-form', async (req, res) => {
 
 
 
-// ✅ API endpoint to get all posts
+// ✅ API endpoint to get all posts with pagination support
 app.get('/api/posts', async (req, res) => {
   try {
-    const posts = await Post.find().sort({ createdAt: -1 });
+    // Parse query parameters
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 100; // Default to 100 for backward compatibility
+    const status = req.query.status; // Optional: comma-separated status values (e.g., "posted,saved")
+    
+    // Build query filter
+    const query = {};
+    if (status) {
+      const statusArray = status.split(',').map(s => s.trim());
+      query.status = { $in: statusArray };
+    }
+    
+    // Calculate pagination
+    const skip = (page - 1) * limit;
+    
+    // Get total count for pagination metadata
+    const total = await Post.countDocuments(query);
+    
+    // Fetch posts with pagination
+    const posts = await Post.find(query)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
+    
+    // Calculate pagination metadata
+    const totalPages = Math.ceil(total / limit);
+    
+    // Return response with pagination metadata (backward compatible)
     res.json({
       success: true,
-      data: posts
+      data: posts,
+      pagination: {
+        currentPage: page,
+        perPage: limit,
+        total: total,
+        totalPages: totalPages,
+        hasNextPage: page < totalPages,
+        hasPrevPage: page > 1
+      }
     });
   } catch (error) {
     console.error('Error fetching posts:', error);
