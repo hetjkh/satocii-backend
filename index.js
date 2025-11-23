@@ -6,6 +6,7 @@ const cors = require('cors');
 const bodyParser = require('body-parser');
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
+const compression = require('compression');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -54,6 +55,7 @@ const uploadVideo = multer({
 const MONGODB_URI = 'mongodb+srv://hetjani818_db_user:123@cluster0.v1x2mx9.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0';
 
 // Middleware
+app.use(compression()); // Compress responses to reduce size
 app.use(cors({
   origin: [
     'https://satocc-coral.vercel.app',
@@ -88,6 +90,11 @@ const postSchema = new mongoose.Schema({
   postToLinkedIn: { type: Boolean, default: true }, // Whether to post to LinkedIn or just save
   status: { type: String, default: 'pending' } // pending, posted, failed, saved
 }, { timestamps: true });
+
+// ✅ Add indexes for better query performance
+postSchema.index({ status: 1, createdAt: -1 }); // Compound index for status + date sorting
+postSchema.index({ createdAt: -1 }); // Index for date sorting
+postSchema.index({ status: 1 }); // Index for status filtering
 
 const Post = mongoose.model('Post', postSchema);
 
@@ -703,7 +710,31 @@ app.post('/api/submit-form', async (req, res) => {
 
 
 
-// ✅ API endpoint to get all posts with pagination support
+// ✅ Simple in-memory cache for posts (5 minute TTL)
+const postsCache = {
+  data: null,
+  timestamp: null,
+  ttl: 5 * 60 * 1000 // 5 minutes
+};
+
+const getCachedPosts = (cacheKey) => {
+  if (postsCache[cacheKey] && postsCache[cacheKey].timestamp) {
+    const age = Date.now() - postsCache[cacheKey].timestamp;
+    if (age < postsCache.ttl) {
+      return postsCache[cacheKey].data;
+    }
+  }
+  return null;
+};
+
+const setCachedPosts = (cacheKey, data) => {
+  postsCache[cacheKey] = {
+    data: data,
+    timestamp: Date.now()
+  };
+};
+
+// ✅ API endpoint to get all posts with pagination support (OPTIMIZED)
 app.get('/api/posts', async (req, res) => {
   try {
     // Parse query parameters
@@ -718,23 +749,39 @@ app.get('/api/posts', async (req, res) => {
       query.status = { $in: statusArray };
     }
     
+    // Create cache key
+    const cacheKey = `posts_${page}_${limit}_${status || 'all'}`;
+    
+    // Check cache first
+    const cached = getCachedPosts(cacheKey);
+    if (cached) {
+      console.log('✅ Returning cached posts');
+      return res.json(cached);
+    }
+    
     // Calculate pagination
     const skip = (page - 1) * limit;
     
-    // Get total count for pagination metadata
-    const total = await Post.countDocuments(query);
-    
-    // Fetch posts with pagination
-    const posts = await Post.find(query)
+    // Optimize: Use lean() for faster queries (returns plain JS objects)
+    // Select only needed fields to reduce data transfer
+    const postsQuery = Post.find(query)
+      .select('_id content title platform status linkedinPostId uploadedImages uploadedVideo mediaUrl mediaType createdAt updatedAt')
       .sort({ createdAt: -1 })
       .skip(skip)
-      .limit(limit);
+      .limit(limit)
+      .lean(); // Use lean() for 2-3x faster queries
+    
+    // Execute query and count in parallel for better performance
+    const [posts, total] = await Promise.all([
+      postsQuery.exec(),
+      Post.countDocuments(query).exec()
+    ]);
     
     // Calculate pagination metadata
     const totalPages = Math.ceil(total / limit);
     
-    // Return response with pagination metadata (backward compatible)
-    res.json({
+    // Build response
+    const response = {
       success: true,
       data: posts,
       pagination: {
@@ -745,7 +792,14 @@ app.get('/api/posts', async (req, res) => {
         hasNextPage: page < totalPages,
         hasPrevPage: page > 1
       }
-    });
+    };
+    
+    // Cache the response (only cache small pages to avoid memory issues)
+    if (limit <= 20) {
+      setCachedPosts(cacheKey, response);
+    }
+    
+    res.json(response);
   } catch (error) {
     console.error('Error fetching posts:', error);
     res.status(500).json({
