@@ -1,10 +1,12 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const axios = require('axios');
+const https = require('https');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
+const compression = require('compression');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -21,7 +23,7 @@ const storage = multer.memoryStorage();
 const upload = multer({ 
   storage: storage,
   limits: {
-    fileSize: 10 * 1024 * 1024 // 10MB limit
+    fileSize: 10 * 1024 * 1024 // 10MB limit for images
   },
   fileFilter: (req, file, cb) => {
     // Accept images only
@@ -33,10 +35,27 @@ const upload = multer({
   }
 });
 
+// Configure multer for video uploads
+const uploadVideo = multer({ 
+  storage: storage,
+  limits: {
+    fileSize: 100 * 1024 * 1024 // 100MB limit for videos
+  },
+  fileFilter: (req, file, cb) => {
+    // Accept videos only
+    if (file.mimetype.startsWith('video/')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only video files are allowed!'), false);
+    }
+  }
+});
+
 // MongoDB connection
 const MONGODB_URI = 'mongodb+srv://hetjani818_db_user:123@cluster0.v1x2mx9.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0';
 
 // Middleware
+app.use(compression()); // Compress responses to reduce size
 app.use(cors({
   origin: [
     'https://satocc-coral.vercel.app',
@@ -66,9 +85,16 @@ const postSchema = new mongoose.Schema({
   mediaDescription: { type: String },           // Description for media content
   mediaThumbnail: { type: String },             // Thumbnail URL for media
   uploadedImages: [{ type: String }],           // Array of Cloudinary image URLs
+  uploadedVideo: { type: String },              // LinkedIn asset URN (for videos uploaded directly)
+  uploadedVideoThumbnail: { type: String },     // Custom video thumbnail URL
   postToLinkedIn: { type: Boolean, default: true }, // Whether to post to LinkedIn or just save
   status: { type: String, default: 'pending' } // pending, posted, failed, saved
 }, { timestamps: true });
+
+// ✅ Add indexes for better query performance
+postSchema.index({ status: 1, createdAt: -1 }); // Compound index for status + date sorting
+postSchema.index({ createdAt: -1 }); // Index for date sorting
+postSchema.index({ status: 1 }); // Index for status filtering
 
 const Post = mongoose.model('Post', postSchema);
 
@@ -90,7 +116,6 @@ const Review = mongoose.model('Review', reviewSchema);
 const teamMemberSchema = new mongoose.Schema({
   name: { type: String, required: true },
   title: { type: String, required: true },
-  email: { type: String, required: true },
   experience: { type: String, required: true },
   image: { type: String, required: true }, // Cloudinary URL
   order: { type: Number, default: 0 }, // For ordering team members
@@ -115,14 +140,15 @@ async function getLinkedInUserInfo() {
   }
 }
 
-// Upload image to LinkedIn and get media URN
-async function uploadImageToLinkedIn(imageUrl, userInfo) {
+// Upload image to LinkedIn and get media URN (accepts file buffer directly)
+async function uploadImageToLinkedIn(imageBuffer, userInfo) {
   try {
-    console.log('📸 Uploading image to LinkedIn:', imageUrl);
+    console.log('📸 Uploading image to LinkedIn directly from buffer');
+    console.log('📦 Image buffer size:', imageBuffer.length, 'bytes');
     
     const personUrn = `urn:li:person:${userInfo.sub}`;
     
-    // Step 1: Register the upload
+    // Step 1: Register the upload for image
     const registerUploadResponse = await axios.post(
       'https://api.linkedin.com/v2/assets?action=registerUpload',
       {
@@ -146,32 +172,280 @@ async function uploadImageToLinkedIn(imageUrl, userInfo) {
       }
     );
 
-    const uploadUrl = registerUploadResponse.data.value.uploadMechanism['com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest'].uploadUrl;
-    const asset = registerUploadResponse.data.value.asset;
+    // Extract upload URL and asset from response
+    const uploadMechanism = registerUploadResponse.data.value.uploadMechanism;
+    if (!uploadMechanism || !uploadMechanism['com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest']) {
+      throw new Error('Invalid response from LinkedIn: missing upload mechanism');
+    }
+    
+    const uploadUrl = uploadMechanism['com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest'].uploadUrl;
+    let asset = registerUploadResponse.data.value.asset;
 
-    console.log('✅ Upload registered. Asset URN:', asset);
+    if (!uploadUrl || !asset) {
+      console.error('❌ Invalid LinkedIn response:', JSON.stringify(registerUploadResponse.data, null, 2));
+      throw new Error('Invalid response from LinkedIn: missing uploadUrl or asset');
+    }
 
-    // Step 2: Download image from Cloudinary
-    const imageResponse = await axios.get(imageUrl, { responseType: 'arraybuffer' });
-    const imageBuffer = Buffer.from(imageResponse.data);
+    // Ensure asset is a string (URN format: urn:li:digitalmediaAsset:...)
+    if (typeof asset !== 'string') {
+      console.error('❌ Asset is not a string:', asset, typeof asset);
+      throw new Error('Invalid asset format from LinkedIn: expected string URN');
+    }
 
-    console.log('📥 Downloaded image from Cloudinary, size:', imageBuffer.length, 'bytes');
+    // Verify asset URN format
+    if (!asset.startsWith('urn:li:digitalmediaAsset:')) {
+      console.error('❌ Invalid asset URN format:', asset);
+      throw new Error(`Invalid asset URN format: ${asset}. Expected format: urn:li:digitalmediaAsset:...`);
+    }
 
-    // Step 3: Upload the image binary to LinkedIn
-    await axios.put(uploadUrl, imageBuffer, {
-      headers: {
-        'Authorization': `Bearer ${LINKEDIN_CONFIG.accessToken}`,
-        'Content-Type': 'application/octet-stream'
-      },
-      maxBodyLength: Infinity,
-      maxContentLength: Infinity
+    console.log('✅ Image upload registered. Asset URN:', asset);
+    console.log('📤 Upload URL:', uploadUrl);
+
+    // Step 2: Upload the image binary directly to LinkedIn
+    console.log('📤 Uploading image binary to LinkedIn...');
+    
+    // Use native https module for binary upload to avoid axios Content-Type issues
+    const uploadUrlObj = new URL(uploadUrl);
+    const uploadResponse = await new Promise((resolve, reject) => {
+      const options = {
+        hostname: uploadUrlObj.hostname,
+        path: uploadUrlObj.pathname + uploadUrlObj.search,
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${LINKEDIN_CONFIG.accessToken}`,
+          'Content-Length': imageBuffer.length
+          // Don't set Content-Type - LinkedIn will detect it from binary data
+        },
+        timeout: 60000 // 1 minute timeout for images
+      };
+
+      const req = https.request(options, (res) => {
+        let responseData = '';
+        res.on('data', (chunk) => {
+          responseData += chunk;
+        });
+        res.on('end', () => {
+          // Check for success status codes (200-299)
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            resolve({
+              status: res.statusCode,
+              statusText: res.statusMessage,
+              headers: res.headers,
+              data: responseData
+            });
+          } else {
+            const error = new Error(`LinkedIn upload failed with status ${res.statusCode}: ${res.statusMessage}`);
+            error.status = res.statusCode;
+            error.response = {
+              status: res.statusCode,
+              statusText: res.statusMessage,
+              headers: res.headers,
+              data: responseData
+            };
+            reject(error);
+          }
+        });
+      });
+
+      req.on('error', (error) => {
+        reject(error);
+      });
+
+      req.on('timeout', () => {
+        req.destroy();
+        reject(new Error('Upload timeout'));
+      });
+
+      // Write the image buffer
+      req.write(imageBuffer);
+      req.end();
     });
 
     console.log('✅ Image uploaded to LinkedIn successfully');
+    console.log('📦 Upload response status:', uploadResponse.status);
 
+    if (!asset) {
+      throw new Error('No asset URN received from LinkedIn upload registration');
+    }
+
+    console.log('✅ Returning asset URN:', asset);
     return asset; // Return the asset URN
   } catch (error) {
-    console.error('❌ Error uploading image to LinkedIn:', error.response?.data || error.message);
+    console.error('❌ Error uploading image to LinkedIn:');
+    console.error('   - Error message:', error.message);
+    console.error('   - Status code:', error.response?.status || error.status);
+    console.error('   - Response data:', JSON.stringify(error.response?.data, null, 2));
+    
+    // Provide more helpful error messages
+    if (error.response?.status === 401 || error.status === 401) {
+      throw new Error('LinkedIn authentication failed. Please check your access token and ensure it has w_member_social permission.');
+    } else if (error.response?.status === 403 || error.status === 403) {
+      throw new Error('LinkedIn permission denied. Your app needs w_member_social permission to post images.');
+    } else if (error.response?.status === 413 || error.status === 413) {
+      throw new Error('Image file too large. LinkedIn supports images up to 20MB.');
+    }
+    
+    throw error;
+  }
+}
+
+// Upload video to LinkedIn and get media URN (accepts file buffer directly)
+async function uploadVideoToLinkedIn(videoBuffer, userInfo) {
+  try {
+    console.log('🎥 Uploading video to LinkedIn directly from buffer');
+    console.log('📦 Video buffer size:', videoBuffer.length, 'bytes');
+    
+    const personUrn = `urn:li:person:${userInfo.sub}`;
+    
+    // Step 1: Register the upload for video
+    const registerUploadResponse = await axios.post(
+      'https://api.linkedin.com/v2/assets?action=registerUpload',
+      {
+        registerUploadRequest: {
+          recipes: ['urn:li:digitalmediaRecipe:feedshare-video'],
+          owner: personUrn,
+          serviceRelationships: [
+            {
+              relationshipType: 'OWNER',
+              identifier: 'urn:li:userGeneratedContent'
+            }
+          ]
+        }
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${LINKEDIN_CONFIG.accessToken}`,
+          'Content-Type': 'application/json',
+          'X-Restli-Protocol-Version': '2.0.0'
+        }
+      }
+    );
+
+    // Extract upload URL and asset from response
+    const uploadMechanism = registerUploadResponse.data.value.uploadMechanism;
+    if (!uploadMechanism || !uploadMechanism['com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest']) {
+      throw new Error('Invalid response from LinkedIn: missing upload mechanism');
+    }
+    
+    const uploadUrl = uploadMechanism['com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest'].uploadUrl;
+    let asset = registerUploadResponse.data.value.asset;
+
+    if (!uploadUrl || !asset) {
+      console.error('❌ Invalid LinkedIn response:', JSON.stringify(registerUploadResponse.data, null, 2));
+      throw new Error('Invalid response from LinkedIn: missing uploadUrl or asset');
+    }
+
+    // Ensure asset is a string (URN format: urn:li:digitalmediaAsset:...)
+    if (typeof asset !== 'string') {
+      console.error('❌ Asset is not a string:', asset, typeof asset);
+      console.error('❌ Full response:', JSON.stringify(registerUploadResponse.data, null, 2));
+      throw new Error('Invalid asset format from LinkedIn: expected string URN');
+    }
+
+    // Verify asset URN format
+    if (!asset.startsWith('urn:li:digitalmediaAsset:')) {
+      console.error('❌ Invalid asset URN format:', asset);
+      throw new Error(`Invalid asset URN format: ${asset}. Expected format: urn:li:digitalmediaAsset:...`);
+    }
+
+    console.log('✅ Video upload registered. Asset URN:', asset);
+    console.log('📤 Upload URL:', uploadUrl);
+
+    // Step 2: Upload the video binary directly to LinkedIn
+    console.log('📤 Uploading video binary to LinkedIn...');
+    
+    // Use native https module for binary upload to avoid axios Content-Type issues
+    const uploadUrlObj = new URL(uploadUrl);
+    const uploadResponse = await new Promise((resolve, reject) => {
+      const options = {
+        hostname: uploadUrlObj.hostname,
+        path: uploadUrlObj.pathname + uploadUrlObj.search,
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${LINKEDIN_CONFIG.accessToken}`,
+          'Content-Length': videoBuffer.length
+          // Don't set Content-Type - LinkedIn will detect it from binary data
+        },
+        timeout: 300000
+      };
+
+      const req = https.request(options, (res) => {
+        let responseData = '';
+        res.on('data', (chunk) => {
+          responseData += chunk;
+        });
+        res.on('end', () => {
+          // Check for success status codes (200-299)
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            // Convert response to axios-like format
+            resolve({
+              status: res.statusCode,
+              statusText: res.statusMessage,
+              headers: res.headers,
+              data: responseData
+            });
+          } else {
+            // LinkedIn returned an error
+            const error = new Error(`LinkedIn upload failed with status ${res.statusCode}: ${res.statusMessage}`);
+            error.status = res.statusCode;
+            error.response = {
+              status: res.statusCode,
+              statusText: res.statusMessage,
+              headers: res.headers,
+              data: responseData
+            };
+            reject(error);
+          }
+        });
+      });
+
+      req.on('error', (error) => {
+        reject(error);
+      });
+
+      req.on('timeout', () => {
+        req.destroy();
+        reject(new Error('Upload timeout'));
+      });
+
+      // Write the video buffer
+      req.write(videoBuffer);
+      req.end();
+    });
+
+    console.log('✅ Video uploaded to LinkedIn successfully');
+    console.log('📦 Upload response status:', uploadResponse.status);
+
+    // According to LinkedIn docs, after successful upload we can use the asset immediately
+    // However, for large videos, LinkedIn might need a moment to process
+    // Let's add a small delay for videos over 10MB
+    if (videoBuffer.length > 10 * 1024 * 1024) {
+      console.log('⏳ Large video detected, waiting 2 seconds for LinkedIn to process...');
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+
+    if (!asset) {
+      throw new Error('No asset URN received from LinkedIn upload registration');
+    }
+
+    console.log('✅ Returning asset URN:', asset);
+    return asset; // Return the asset URN
+  } catch (error) {
+    console.error('❌ Error uploading video to LinkedIn:');
+    console.error('   - Error message:', error.message);
+    console.error('   - Status code:', error.response?.status);
+    console.error('   - Response data:', JSON.stringify(error.response?.data, null, 2));
+    console.error('   - Full error:', error);
+    
+    // Provide more helpful error messages
+    if (error.response?.status === 401) {
+      throw new Error('LinkedIn authentication failed. Please check your access token and ensure it has w_member_social permission.');
+    } else if (error.response?.status === 403) {
+      throw new Error('LinkedIn permission denied. Your app needs w_member_social permission to post videos.');
+    } else if (error.response?.status === 413) {
+      throw new Error('Video file too large. LinkedIn supports videos up to 5GB.');
+    }
+    
     throw error;
   }
 }
@@ -194,7 +468,8 @@ async function postToLinkedIn(content, options = {}) {
 
     // Determine if we have images to post
     const hasUploadedImages = uploadedImages && uploadedImages.length > 0;
-    const effectiveMediaType = hasUploadedImages ? 'IMAGE' : mediaType;
+    // If mediaType is VIDEO, keep it as VIDEO, otherwise use IMAGE if we have images
+    const effectiveMediaType = mediaType === 'VIDEO' ? 'VIDEO' : (hasUploadedImages ? 'IMAGE' : mediaType);
 
     // Build the post data
     const postData = {
@@ -213,17 +488,77 @@ async function postToLinkedIn(content, options = {}) {
       }
     };
 
-    // Add uploaded images if available
-    if (hasUploadedImages) {
-      console.log(`🔄 Uploading ${uploadedImages.length} image(s) to LinkedIn...`);
+    // Handle video uploads - videos should already be uploaded and asset URN provided
+    if (mediaType === 'VIDEO' && options.uploadedVideoAssetUrn) {
+      console.log('🎥 Processing video post to LinkedIn with asset URN...');
       
-      // Upload each image to LinkedIn and get media URNs
-      const mediaUrns = [];
+      // Use the video asset URN directly (video was already uploaded)
+      postData.specificContent['com.linkedin.ugc.ShareContent'].media = [{
+        status: 'READY',
+        description: {
+          text: mediaDescription || content
+        },
+        media: options.uploadedVideoAssetUrn, // Asset URN from previous upload
+        title: {
+          text: mediaTitle || title || 'Video Post'
+        }
+      }];
+
+      // Ensure shareMediaCategory is set to VIDEO
+      postData.specificContent['com.linkedin.ugc.ShareContent'].shareMediaCategory = 'VIDEO';
+
+      console.log('✅ Video media added to post');
+      console.log('📦 Asset URN:', options.uploadedVideoAssetUrn);
+    }
+    // Handle image uploads - images should already be uploaded and asset URNs provided
+    else if (mediaType === 'IMAGE' && options.uploadedImageAssetUrns && options.uploadedImageAssetUrns.length > 0) {
+      console.log(`📸 Processing image post to LinkedIn with ${options.uploadedImageAssetUrns.length} asset URN(s)...`);
+      
+      // Use the image asset URNs directly (images were already uploaded)
+      postData.specificContent['com.linkedin.ugc.ShareContent'].media = options.uploadedImageAssetUrns.map((assetUrn, index) => ({
+        status: 'READY',
+        description: {
+          text: mediaDescription || content
+        },
+        media: assetUrn, // Asset URN from previous upload
+        title: {
+          text: mediaTitle || title || `Image ${index + 1}`
+        }
+      }));
+
+      // Ensure shareMediaCategory is set to IMAGE
+      postData.specificContent['com.linkedin.ugc.ShareContent'].shareMediaCategory = 'IMAGE';
+
+      console.log('✅ Image media added to post');
+      console.log('📦 Asset URNs:', options.uploadedImageAssetUrns);
+    }
+    // Add uploaded images from Cloudinary URLs if available (legacy support)
+    else if (hasUploadedImages) {
+      console.log(`🔄 Uploading ${uploadedImages.length} image(s) from Cloudinary to LinkedIn...`);
+      
+      // Check if images are asset URNs or URLs
+      const imageAssetUrns = [];
+      const imageUrls = [];
+      
       for (let i = 0; i < uploadedImages.length; i++) {
+        if (uploadedImages[i].startsWith('urn:li:digitalmediaAsset:')) {
+          // It's already an asset URN
+          imageAssetUrns.push(uploadedImages[i]);
+        } else {
+          // It's a URL, need to upload it
+          imageUrls.push(uploadedImages[i]);
+        }
+      }
+      
+      // Upload URLs to LinkedIn and get media URNs
+      for (let i = 0; i < imageUrls.length; i++) {
         try {
-          const assetUrn = await uploadImageToLinkedIn(uploadedImages[i], userInfo);
-          mediaUrns.push(assetUrn);
-          console.log(`✅ Image ${i + 1}/${uploadedImages.length} uploaded successfully`);
+          // Download image from URL and upload to LinkedIn
+          const imageResponse = await axios.get(imageUrls[i], { responseType: 'arraybuffer' });
+          const imageBuffer = Buffer.from(imageResponse.data);
+          const assetUrn = await uploadImageToLinkedIn(imageBuffer, userInfo);
+          imageAssetUrns.push(assetUrn);
+          console.log(`✅ Image ${i + 1}/${imageUrls.length} uploaded successfully`);
         } catch (uploadError) {
           console.error(`❌ Failed to upload image ${i + 1}:`, uploadError.message);
           throw new Error(`Failed to upload image ${i + 1} to LinkedIn: ${uploadError.message}`);
@@ -231,7 +566,7 @@ async function postToLinkedIn(content, options = {}) {
       }
 
       // Use the media URNs in the post
-      postData.specificContent['com.linkedin.ugc.ShareContent'].media = mediaUrns.map((assetUrn, index) => ({
+      postData.specificContent['com.linkedin.ugc.ShareContent'].media = imageAssetUrns.map((assetUrn, index) => ({
         status: 'READY',
         description: {
           text: mediaDescription || content
@@ -241,9 +576,12 @@ async function postToLinkedIn(content, options = {}) {
           text: mediaTitle || title || `Image ${index + 1}`
         }
       }));
+      
+      // Ensure shareMediaCategory is set to IMAGE
+      postData.specificContent['com.linkedin.ugc.ShareContent'].shareMediaCategory = 'IMAGE';
     }
-    // Add media URL if provided (for ARTICLE or VIDEO)
-    else if (mediaType !== 'NONE' && mediaUrl) {
+    // Add media URL if provided (for ARTICLE only - videos are handled above)
+    else if (mediaType === 'ARTICLE' && mediaUrl) {
       postData.specificContent['com.linkedin.ugc.ShareContent'].media = [{
         status: 'READY',
         description: {
@@ -266,23 +604,54 @@ async function postToLinkedIn(content, options = {}) {
     console.log('📤 Posting to LinkedIn:');
     console.log('   - Media Category:', effectiveMediaType);
     console.log('   - Uploaded Images:', uploadedImages.length);
+    console.log('   - Has Video:', mediaType === 'VIDEO');
     console.log('   - Post Data:', JSON.stringify(postData, null, 2));
 
     // Post to LinkedIn using the UGC Posts API
+    // According to docs: POST https://api.linkedin.com/v2/ugcPosts
+    // Response should be 201 Created with X-RestLi-Id header
+    console.log('📤 Final post data being sent:', JSON.stringify(postData, null, 2));
+    
     const response = await axios.post('https://api.linkedin.com/v2/ugcPosts', postData, {
       headers: {
         'Authorization': `Bearer ${LINKEDIN_CONFIG.accessToken}`,
         'Content-Type': 'application/json',
         'X-Restli-Protocol-Version': '2.0.0'
-      }
+      },
+      validateStatus: (status) => status >= 200 && status < 300 // Accept 200-299 as success
     });
+
+    console.log('✅ LinkedIn post response status:', response.status);
+    console.log('📦 Response status text:', response.statusText);
+    console.log('📦 Response headers:', JSON.stringify(response.headers, null, 2));
+    console.log('📦 Response data:', JSON.stringify(response.data, null, 2));
+    
+    // Check for X-RestLi-Id header (post ID)
+    const postId = response.headers['x-restli-id'] || response.headers['X-RestLi-Id'] || response.data?.id;
+    if (postId) {
+      console.log('✅ Post ID from LinkedIn:', postId);
+    }
 
     return {
       ...response.data,
-      userInfo: userInfo
+      userInfo: userInfo,
+      postId: response.headers['x-restli-id'] || response.data.id
     };
   } catch (error) {
-    console.error('Error posting to LinkedIn:', error.response?.data || error.message);
+    console.error('❌ Error posting to LinkedIn:');
+    console.error('   - Error message:', error.message);
+    console.error('   - Status code:', error.response?.status);
+    console.error('   - Response data:', JSON.stringify(error.response?.data, null, 2));
+    
+    // Provide more helpful error messages
+    if (error.response?.status === 401) {
+      throw new Error('LinkedIn authentication failed. Please check your access token.');
+    } else if (error.response?.status === 403) {
+      throw new Error('LinkedIn permission denied. Your app needs w_member_social permission.');
+    } else if (error.response?.status === 400) {
+      throw new Error(`LinkedIn API error: ${JSON.stringify(error.response?.data)}`);
+    }
+    
     throw error;
   }
 }
@@ -291,7 +660,7 @@ async function postToLinkedIn(content, options = {}) {
 const GOOGLE_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwX6sBx2LCfMH_fYgjmXoQY_sswvUptgOA-Jk8JT4rkXhMW6PjGbsqXQ70QlZ4Yf1Vh/exec';
 
 
-// ✅ API endpoint to submit form data
+// ✅ API endpoint to submit form data (Retailer signup)
 app.post('/api/submit-form', async (req, res) => {
   try {
     const { fullName, address, email, phone, companyUrl, pos, dailyCustomers } = req.body;
@@ -338,16 +707,142 @@ app.post('/api/submit-form', async (req, res) => {
   }
 });
 
+// ✅ Newsletter subscription endpoint
+// This collects an email and forwards it to the same Google Apps Script,
+// which can be configured to notify info@satocci.com or store in a sheet.
+app.post('/api/newsletter', async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email is required'
+      });
+    }
+
+    const formData = new URLSearchParams({
+      email,
+      source: 'footer_newsletter'
+    }).toString();
+
+    const response = await axios.post(GOOGLE_SCRIPT_URL, formData, {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      maxRedirects: 5,
+      validateStatus: (status) => status >= 200 && status < 400
+    });
+
+    if (response.status === 200) {
+      return res.json({
+        success: true,
+        message: 'Newsletter subscription submitted successfully',
+        data: response.data
+      });
+    } else {
+      throw new Error(`Unexpected response status: ${response.status} ${response.statusText}`);
+    }
+  } catch (error) {
+    console.error('Error submitting newsletter subscription:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to submit newsletter subscription',
+      error: error.message
+    });
+  }
+});
 
 
-// ✅ API endpoint to get all posts
+
+// ✅ Simple in-memory cache for posts (5 minute TTL)
+const postsCache = {
+  data: null,
+  timestamp: null,
+  ttl: 5 * 60 * 1000 // 5 minutes
+};
+
+const getCachedPosts = (cacheKey) => {
+  if (postsCache[cacheKey] && postsCache[cacheKey].timestamp) {
+    const age = Date.now() - postsCache[cacheKey].timestamp;
+    if (age < postsCache.ttl) {
+      return postsCache[cacheKey].data;
+    }
+  }
+  return null;
+};
+
+const setCachedPosts = (cacheKey, data) => {
+  postsCache[cacheKey] = {
+    data: data,
+    timestamp: Date.now()
+  };
+};
+
+// ✅ API endpoint to get all posts with pagination support (OPTIMIZED)
 app.get('/api/posts', async (req, res) => {
   try {
-    const posts = await Post.find().sort({ createdAt: -1 });
-    res.json({
+    // Parse query parameters
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 100; // Default to 100 for backward compatibility
+    const status = req.query.status; // Optional: comma-separated status values (e.g., "posted,saved")
+    
+    // Build query filter
+    const query = {};
+    if (status) {
+      const statusArray = status.split(',').map(s => s.trim());
+      query.status = { $in: statusArray };
+    }
+    
+    // Create cache key
+    const cacheKey = `posts_${page}_${limit}_${status || 'all'}`;
+    
+    // Check cache first
+    const cached = getCachedPosts(cacheKey);
+    if (cached) {
+      console.log('✅ Returning cached posts');
+      return res.json(cached);
+    }
+    
+    // Calculate pagination
+    const skip = (page - 1) * limit;
+    
+    // Optimize: Use lean() for faster queries (returns plain JS objects)
+    // Select only needed fields to reduce data transfer
+    const postsQuery = Post.find(query)
+      .select('_id content title platform status linkedinPostId uploadedImages uploadedVideo mediaUrl mediaType createdAt updatedAt')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean(); // Use lean() for 2-3x faster queries
+    
+    // Execute query and count in parallel for better performance
+    const [posts, total] = await Promise.all([
+      postsQuery.exec(),
+      Post.countDocuments(query).exec()
+    ]);
+    
+    // Calculate pagination metadata
+    const totalPages = Math.ceil(total / limit);
+    
+    // Build response
+    const response = {
       success: true,
-      data: posts
-    });
+      data: posts,
+      pagination: {
+        currentPage: page,
+        perPage: limit,
+        total: total,
+        totalPages: totalPages,
+        hasNextPage: page < totalPages,
+        hasPrevPage: page > 1
+      }
+    };
+    
+    // Cache the response (only cache small pages to avoid memory issues)
+    if (limit <= 20) {
+      setCachedPosts(cacheKey, response);
+    }
+    
+    res.json(response);
   } catch (error) {
     console.error('Error fetching posts:', error);
     res.status(500).json({
@@ -433,6 +928,219 @@ app.post('/api/upload-image', upload.single('image'), async (req, res) => {
   }
 });
 
+// ✅ API endpoint to upload image directly to LinkedIn
+app.post('/api/upload-image-linkedin', upload.single('image'), async (req, res) => {
+  try {
+    console.log('📸 Image upload endpoint hit - uploading directly to LinkedIn');
+    console.log('📁 Request file:', req.file ? {
+      originalname: req.file.originalname,
+      mimetype: req.file.mimetype,
+      size: req.file.size,
+      buffer: req.file.buffer ? `${req.file.buffer.length} bytes` : 'no buffer'
+    } : 'No file');
+
+    if (!req.file) {
+      console.error('❌ No file in request');
+      return res.status(400).json({
+        success: false,
+        message: 'No image file provided'
+      });
+    }
+
+    if (!req.file.buffer) {
+      console.error('❌ No buffer in file');
+      return res.status(400).json({
+        success: false,
+        message: 'File buffer is missing'
+      });
+    }
+
+    console.log('📸 Uploading image directly to LinkedIn:', {
+      originalname: req.file.originalname,
+      mimetype: req.file.mimetype,
+      size: req.file.size
+    });
+
+    // Get user info to get the user ID
+    const userInfo = await getLinkedInUserInfo();
+    
+    // Upload image directly to LinkedIn and get asset URN
+    const imageBuffer = Buffer.from(req.file.buffer);
+    const assetUrn = await uploadImageToLinkedIn(imageBuffer, userInfo);
+
+    console.log('✅ Image uploaded successfully to LinkedIn');
+    console.log('📦 Asset URN:', assetUrn);
+
+    // Also upload to Cloudinary for website display
+    console.log('📤 Also uploading to Cloudinary for website display...');
+    const cloudinaryUrl = await new Promise((resolve, reject) => {
+      const uploadStream = cloudinary.uploader.upload_stream(
+        {
+          folder: 'linkedin-posts',
+          resource_type: 'image',
+          transformation: [
+            { quality: 'auto' },
+            { fetch_format: 'auto' }
+          ]
+        },
+        (error, result) => {
+          if (error) {
+            console.error('⚠️ Cloudinary upload error (non-fatal):', error.message);
+            // Don't fail the request if Cloudinary fails, just log it
+            resolve(null);
+          } else {
+            console.log('✅ Image also uploaded to Cloudinary:', result.secure_url);
+            resolve(result.secure_url);
+          }
+        }
+      );
+
+      // Convert buffer to stream and pipe to cloudinary
+      const { Readable } = require('stream');
+      const bufferStream = new Readable();
+      bufferStream.push(imageBuffer);
+      bufferStream.push(null);
+      bufferStream.pipe(uploadStream);
+    });
+
+    // Return both asset URN (for LinkedIn) and Cloudinary URL (for website)
+    res.json({
+      success: true,
+      message: 'Image uploaded successfully to LinkedIn',
+      data: {
+        assetUrn: assetUrn, // For LinkedIn posting
+        url: cloudinaryUrl, // For website display (null if Cloudinary upload failed)
+        size: req.file.size,
+        mimetype: req.file.mimetype,
+        originalname: req.file.originalname
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error uploading image to LinkedIn:', error);
+    // Make sure we haven't already sent a response
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        message: 'Failed to upload image to LinkedIn',
+        error: error.message
+      });
+    }
+  }
+});
+
+// ✅ API endpoint to upload video directly to LinkedIn
+app.post('/api/upload-video', (req, res, next) => {
+  uploadVideo.single('video')(req, res, (err) => {
+    if (err) {
+      console.error('❌ Multer error:', err.message);
+      return res.status(400).json({
+        success: false,
+        message: err.message || 'File upload error'
+      });
+    }
+    next();
+  });
+}, async (req, res) => {
+  try {
+    console.log('📹 Video upload endpoint hit - uploading directly to LinkedIn');
+    console.log('📁 Request file:', req.file ? {
+      originalname: req.file.originalname,
+      mimetype: req.file.mimetype,
+      size: req.file.size,
+      buffer: req.file.buffer ? `${req.file.buffer.length} bytes` : 'no buffer'
+    } : 'No file');
+
+    if (!req.file) {
+      console.error('❌ No file in request');
+      return res.status(400).json({
+        success: false,
+        message: 'No video file provided'
+      });
+    }
+
+    if (!req.file.buffer) {
+      console.error('❌ No buffer in file');
+      return res.status(400).json({
+        success: false,
+        message: 'File buffer is missing'
+      });
+    }
+
+    console.log('📹 Uploading video directly to LinkedIn:', {
+      originalname: req.file.originalname,
+      mimetype: req.file.mimetype,
+      size: req.file.size
+    });
+
+    // Get user info to get the user ID
+    const userInfo = await getLinkedInUserInfo();
+    
+    // Upload video directly to LinkedIn and get asset URN
+    const videoBuffer = Buffer.from(req.file.buffer);
+    const assetUrn = await uploadVideoToLinkedIn(videoBuffer, userInfo);
+
+    console.log('✅ Video uploaded successfully to LinkedIn');
+    console.log('📦 Asset URN:', assetUrn);
+
+    // Also upload to Cloudinary for website display
+    console.log('📤 Also uploading to Cloudinary for website display...');
+    const cloudinaryUrl = await new Promise((resolve, reject) => {
+      const uploadStream = cloudinary.uploader.upload_stream(
+        {
+          folder: 'linkedin-posts',
+          resource_type: 'video',
+          transformation: [
+            { quality: 'auto' },
+            { fetch_format: 'auto' }
+          ]
+        },
+        (error, result) => {
+          if (error) {
+            console.error('⚠️ Cloudinary upload error (non-fatal):', error.message);
+            // Don't fail the request if Cloudinary fails, just log it
+            resolve(null);
+          } else {
+            console.log('✅ Video also uploaded to Cloudinary:', result.secure_url);
+            resolve(result.secure_url);
+          }
+        }
+      );
+
+      // Convert buffer to stream and pipe to cloudinary
+      const { Readable } = require('stream');
+      const bufferStream = new Readable();
+      bufferStream.push(videoBuffer);
+      bufferStream.push(null);
+      bufferStream.pipe(uploadStream);
+    });
+
+    // Return both asset URN (for LinkedIn) and Cloudinary URL (for website)
+    res.json({
+      success: true,
+      message: 'Video uploaded successfully to LinkedIn',
+      data: {
+        assetUrn: assetUrn, // For LinkedIn posting
+        url: cloudinaryUrl, // For website display (null if Cloudinary upload failed)
+        size: req.file.size,
+        mimetype: req.file.mimetype,
+        originalname: req.file.originalname
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error uploading video to LinkedIn:', error);
+    // Make sure we haven't already sent a response
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        message: 'Failed to upload video to LinkedIn',
+        error: error.message
+      });
+    }
+  }
+});
+
 // ✅ API endpoint to get LinkedIn user info
 app.get('/api/linkedin-userinfo', async (req, res) => {
   try {
@@ -463,6 +1171,9 @@ app.post('/api/post-to-linkedin', async (req, res) => {
       mediaDescription = '', 
       mediaThumbnail = '',
       uploadedImages = [],
+      uploadedVideo = '',
+      uploadedVideoThumbnail = '',
+      uploadedImageAssetUrns = [], // Asset URNs for images uploaded directly to LinkedIn
       postToLinkedIn: shouldPostToLinkedIn = true
     } = req.body;
 
@@ -472,6 +1183,8 @@ app.post('/api/post-to-linkedin', async (req, res) => {
       mediaType,
       mediaUrl,
       uploadedImages: uploadedImages.length,
+      uploadedVideo: uploadedVideo ? 'present' : 'none',
+      uploadedVideoThumbnail: uploadedVideoThumbnail ? 'present' : 'none',
       postToLinkedIn: shouldPostToLinkedIn
     });
 
@@ -494,6 +1207,8 @@ app.post('/api/post-to-linkedin', async (req, res) => {
       mediaDescription: mediaDescription,
       mediaThumbnail: mediaThumbnail,
       uploadedImages: uploadedImages,
+      uploadedVideo: uploadedVideo,
+      uploadedVideoThumbnail: uploadedVideoThumbnail,
       postToLinkedIn: shouldPostToLinkedIn,
       status: shouldPostToLinkedIn ? 'pending' : 'saved'
     });
@@ -519,14 +1234,72 @@ app.post('/api/post-to-linkedin', async (req, res) => {
     try {
       // Post to LinkedIn
       console.log('🚀 Attempting to post to LinkedIn...');
+      
+      // Determine the actual media type and URL
+      let effectiveMediaType = mediaType;
+      let effectiveMediaUrl = mediaUrl;
+      let effectiveMediaThumbnail = mediaThumbnail;
+      let uploadedVideoAssetUrn = null;
+      let uploadedImageAssetUrns = [];
+      
+      // If we have an uploaded video, it should be an asset URN (not a URL)
+      // Check if uploadedVideo is an asset URN (starts with urn:li:digitalmediaAsset:)
+      if (uploadedVideo) {
+        if (uploadedVideo.startsWith('urn:li:digitalmediaAsset:')) {
+          // It's already an asset URN from direct LinkedIn upload
+          effectiveMediaType = 'VIDEO';
+          uploadedVideoAssetUrn = uploadedVideo;
+          effectiveMediaThumbnail = uploadedVideoThumbnail || mediaThumbnail;
+          console.log('📹 Using uploaded video asset URN for LinkedIn post');
+        } else {
+          // Legacy: It's a URL (shouldn't happen with new flow, but handle gracefully)
+          console.warn('⚠️ Uploaded video is a URL, not an asset URN. This should not happen with direct LinkedIn upload.');
+          effectiveMediaType = 'VIDEO';
+          effectiveMediaUrl = uploadedVideo;
+          effectiveMediaThumbnail = uploadedVideoThumbnail || mediaThumbnail;
+        }
+      }
+      
+      // Check if we have asset URNs provided separately (from direct LinkedIn upload)
+      if (uploadedImageAssetUrns && uploadedImageAssetUrns.length > 0) {
+        // We have images uploaded directly to LinkedIn with asset URNs
+        effectiveMediaType = 'IMAGE';
+        uploadedImageAssetUrns = uploadedImageAssetUrns;
+        console.log(`📸 Using ${uploadedImageAssetUrns.length} uploaded image asset URN(s) for LinkedIn post`);
+      }
+      // Otherwise, check if uploadedImages contain asset URNs (legacy support)
+      else if (uploadedImages && uploadedImages.length > 0) {
+        const imageAssetUrns = [];
+        const imageUrls = [];
+        
+        for (let i = 0; i < uploadedImages.length; i++) {
+          if (uploadedImages[i].startsWith('urn:li:digitalmediaAsset:')) {
+            // It's an asset URN from direct LinkedIn upload
+            imageAssetUrns.push(uploadedImages[i]);
+          } else {
+            // It's a URL (from Cloudinary)
+            imageUrls.push(uploadedImages[i]);
+          }
+        }
+        
+        if (imageAssetUrns.length > 0) {
+          // We have images uploaded directly to LinkedIn
+          effectiveMediaType = 'IMAGE';
+          uploadedImageAssetUrns = imageAssetUrns;
+          console.log(`📸 Using ${imageAssetUrns.length} uploaded image asset URN(s) for LinkedIn post`);
+        }
+      }
+      
       const linkedinResponse = await postToLinkedIn(content, {
         title,
-        mediaType,
-        mediaUrl,
+        mediaType: effectiveMediaType,
+        mediaUrl: effectiveMediaUrl,
         mediaTitle,
         mediaDescription,
-        mediaThumbnail,
-        uploadedImages
+        mediaThumbnail: effectiveMediaThumbnail,
+        uploadedImages: uploadedImages, // Keep for legacy support
+        uploadedVideoAssetUrn: uploadedVideoAssetUrn,
+        uploadedImageAssetUrns: uploadedImageAssetUrns.length > 0 ? uploadedImageAssetUrns : undefined
       });
       
       // Update post record with LinkedIn post ID and user ID
@@ -556,21 +1329,53 @@ app.post('/api/post-to-linkedin', async (req, res) => {
       newPost.status = 'failed';
       await newPost.save();
 
-      console.error('❌ LinkedIn posting failed:', linkedinError.response?.data || linkedinError.message);
+      console.error('❌ LinkedIn posting failed:');
+      console.error('   - Error message:', linkedinError.message);
+      console.error('   - Error stack:', linkedinError.stack);
+      console.error('   - Status code:', linkedinError.response?.status);
+      console.error('   - Response data:', JSON.stringify(linkedinError.response?.data, null, 2));
+      console.error('   - Full error:', linkedinError);
+
+      // Provide more helpful error messages
+      let errorMessage = 'Failed to post to LinkedIn';
+      if (linkedinError.response?.data) {
+        if (typeof linkedinError.response.data === 'string') {
+          errorMessage = linkedinError.response.data;
+        } else if (linkedinError.response.data.message) {
+          errorMessage = linkedinError.response.data.message;
+        } else {
+          errorMessage = JSON.stringify(linkedinError.response.data);
+        }
+      } else if (linkedinError.message) {
+        errorMessage = linkedinError.message;
+      }
 
       res.status(500).json({
         success: false,
-        message: 'Failed to post to LinkedIn',
+        message: errorMessage,
         error: linkedinError.response?.data || linkedinError.message,
         postId: newPost._id
       });
     }
 
   } catch (error) {
-    console.error('Error in post-to-linkedin endpoint:', error);
+    console.error('❌ Error in post-to-linkedin endpoint:');
+    console.error('   - Error message:', error.message);
+    console.error('   - Error stack:', error.stack);
+    
+    // Check if we already saved a post
+    if (newPost && newPost._id) {
+      try {
+        newPost.status = 'failed';
+        await newPost.save();
+      } catch (saveError) {
+        console.error('❌ Failed to update post status:', saveError);
+      }
+    }
+
     res.status(500).json({
       success: false,
-      message: 'Internal server error',
+      message: error.message || 'Internal server error',
       error: error.message
     });
   }
@@ -587,7 +1392,9 @@ app.post('/api/save-post', async (req, res) => {
       mediaTitle = '', 
       mediaDescription = '', 
       mediaThumbnail = '',
-      uploadedImages = []
+      uploadedImages = [],
+      uploadedVideo = '',
+      uploadedVideoThumbnail = ''
     } = req.body;
 
     if (!content) {
@@ -607,6 +1414,8 @@ app.post('/api/save-post', async (req, res) => {
       mediaDescription: mediaDescription,
       mediaThumbnail: mediaThumbnail,
       uploadedImages: uploadedImages,
+      uploadedVideo: uploadedVideo,
+      uploadedVideoThumbnail: uploadedVideoThumbnail,
       postToLinkedIn: false,
       status: 'saved'
     });
@@ -620,6 +1429,8 @@ app.post('/api/save-post', async (req, res) => {
         postId: newPost._id,
         content: content,
         uploadedImages: uploadedImages,
+        uploadedVideo: uploadedVideo,
+        uploadedVideoThumbnail: uploadedVideoThumbnail,
         status: 'saved'
       }
     });
@@ -875,20 +1686,19 @@ app.get('/api/team-members/all', async (req, res) => {
 // ✅ Create a new team member
 app.post('/api/team-members', async (req, res) => {
   try {
-    const { name, title, email, experience, image, order, isActive } = req.body;
+    const { name, title, experience, image, order, isActive } = req.body;
 
     // Validate required fields
-    if (!name || !title || !email || !experience || !image) {
+    if (!name || !title || !experience || !image) {
       return res.status(400).json({
         success: false,
-        message: 'Name, title, email, experience, and image are required'
+        message: 'Name, title, experience, and image are required'
       });
     }
 
     const newTeamMember = new TeamMember({
       name,
       title,
-      email,
       experience,
       image,
       order: order || 0,
@@ -917,7 +1727,7 @@ app.post('/api/team-members', async (req, res) => {
 app.put('/api/team-members/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, title, email, experience, image, order, isActive } = req.body;
+    const { name, title, experience, image, order, isActive } = req.body;
 
     const teamMember = await TeamMember.findById(id);
     if (!teamMember) {
@@ -930,7 +1740,6 @@ app.put('/api/team-members/:id', async (req, res) => {
     // Update fields
     if (name !== undefined) teamMember.name = name;
     if (title !== undefined) teamMember.title = title;
-    if (email !== undefined) teamMember.email = email;
     if (experience !== undefined) teamMember.experience = experience;
     if (image !== undefined) teamMember.image = image;
     if (order !== undefined) teamMember.order = order;
