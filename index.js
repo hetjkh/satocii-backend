@@ -660,7 +660,7 @@ async function postToLinkedIn(content, options = {}) {
 const GOOGLE_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwX6sBx2LCfMH_fYgjmXoQY_sswvUptgOA-Jk8JT4rkXhMW6PjGbsqXQ70QlZ4Yf1Vh/exec';
 
 
-// ✅ API endpoint to submit form data
+// ✅ API endpoint to submit form data (Retailer signup)
 app.post('/api/submit-form', async (req, res) => {
   try {
     const { fullName, address, email, phone, companyUrl, pos, dailyCustomers } = req.body;
@@ -702,6 +702,50 @@ app.post('/api/submit-form', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to submit form data',
+      error: error.message
+    });
+  }
+});
+
+// ✅ Newsletter subscription endpoint
+// This collects an email and forwards it to the same Google Apps Script,
+// which can be configured to notify info@satocci.com or store in a sheet.
+app.post('/api/newsletter', async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email is required'
+      });
+    }
+
+    const formData = new URLSearchParams({
+      email,
+      source: 'footer_newsletter'
+    }).toString();
+
+    const response = await axios.post(GOOGLE_SCRIPT_URL, formData, {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      maxRedirects: 5,
+      validateStatus: (status) => status >= 200 && status < 400
+    });
+
+    if (response.status === 200) {
+      return res.json({
+        success: true,
+        message: 'Newsletter subscription submitted successfully',
+        data: response.data
+      });
+    } else {
+      throw new Error(`Unexpected response status: ${response.status} ${response.statusText}`);
+    }
+  } catch (error) {
+    console.error('Error submitting newsletter subscription:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to submit newsletter subscription',
       error: error.message
     });
   }
