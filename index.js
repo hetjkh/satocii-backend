@@ -116,7 +116,6 @@ const Review = mongoose.model('Review', reviewSchema);
 const teamMemberSchema = new mongoose.Schema({
   name: { type: String, required: true },
   title: { type: String, required: true },
-  email: { type: String, required: true },
   experience: { type: String, required: true },
   image: { type: String, required: true }, // Cloudinary URL
   order: { type: Number, default: 0 }, // For ordering team members
@@ -1643,20 +1642,19 @@ app.get('/api/team-members/all', async (req, res) => {
 // ✅ Create a new team member
 app.post('/api/team-members', async (req, res) => {
   try {
-    const { name, title, email, experience, image, order, isActive } = req.body;
+    const { name, title, experience, image, order, isActive } = req.body;
 
     // Validate required fields
-    if (!name || !title || !email || !experience || !image) {
+    if (!name || !title || !experience || !image) {
       return res.status(400).json({
         success: false,
-        message: 'Name, title, email, experience, and image are required'
+        message: 'Name, title, experience, and image are required'
       });
     }
 
     const newTeamMember = new TeamMember({
       name,
       title,
-      email,
       experience,
       image,
       order: order || 0,
@@ -1685,7 +1683,7 @@ app.post('/api/team-members', async (req, res) => {
 app.put('/api/team-members/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, title, email, experience, image, order, isActive } = req.body;
+    const { name, title, experience, image, order, isActive } = req.body;
 
     const teamMember = await TeamMember.findById(id);
     if (!teamMember) {
@@ -1698,7 +1696,6 @@ app.put('/api/team-members/:id', async (req, res) => {
     // Update fields
     if (name !== undefined) teamMember.name = name;
     if (title !== undefined) teamMember.title = title;
-    if (email !== undefined) teamMember.email = email;
     if (experience !== undefined) teamMember.experience = experience;
     if (image !== undefined) teamMember.image = image;
     if (order !== undefined) teamMember.order = order;
