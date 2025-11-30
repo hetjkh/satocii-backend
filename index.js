@@ -60,8 +60,8 @@ app.use(cors({
   origin: [
     'https://satocc-coral.vercel.app',
     'http://localhost:3000',
-    'https://satocci.com'
-    'https://api.satocci.com'
+    'https://satocci.com',
+    'https://api.satocci.com',
   ],
   credentials: true
 }));
