@@ -59,7 +59,8 @@ app.use(compression()); // Compress responses to reduce size
 app.use(cors({
   origin: [
     'https://satocc-coral.vercel.app',
-    'http://localhost:3000'
+    'http://localhost:3000',
+    'https://satocci.com'
   ],
   credentials: true
 }));
