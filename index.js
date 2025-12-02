@@ -59,7 +59,9 @@ app.use(compression()); // Compress responses to reduce size
 app.use(cors({
   origin: [
     'https://satocc-coral.vercel.app',
-    'http://localhost:3000'
+    'http://localhost:3000',
+    'https://satocci.com',
+    'https://api.satocci.com',
   ],
   credentials: true
 }));
@@ -661,7 +663,7 @@ const GOOGLE_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwX6sBx2LCfMH
 
 
 // ✅ API endpoint to submit form data (Retailer signup)
-app.post('/api/submit-form', async (req, res) => {
+app.post('/submit-form', async (req, res) => {
   try {
     const { fullName, address, email, phone, companyUrl, pos, dailyCustomers } = req.body;
 
@@ -710,7 +712,7 @@ app.post('/api/submit-form', async (req, res) => {
 // ✅ Newsletter subscription endpoint
 // This collects an email and forwards it to the same Google Apps Script,
 // which can be configured to notify info@satocci.com or store in a sheet.
-app.post('/api/newsletter', async (req, res) => {
+app.post('/newsletter', async (req, res) => {
   try {
     const { email } = req.body;
 
@@ -778,7 +780,7 @@ const setCachedPosts = (cacheKey, data) => {
 };
 
 // ✅ API endpoint to get all posts with pagination support (OPTIMIZED)
-app.get('/api/posts', async (req, res) => {
+app.get('/posts', async (req, res) => {
   try {
     // Parse query parameters
     const page = parseInt(req.query.page) || 1;
@@ -855,7 +857,7 @@ app.get('/api/posts', async (req, res) => {
 
 
 // ✅ Simple test endpoint
-app.get('/api/test', (req, res) => {
+app.get('/test', (req, res) => {
   res.json({
     success: true,
     message: 'API is working!',
@@ -867,7 +869,7 @@ app.get('/api/test', (req, res) => {
 });
 
 // ✅ API endpoint to upload image to Cloudinary
-app.post('/api/upload-image', upload.single('image'), async (req, res) => {
+app.post('/upload-image', upload.single('image'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({
@@ -929,7 +931,7 @@ app.post('/api/upload-image', upload.single('image'), async (req, res) => {
 });
 
 // ✅ API endpoint to upload image directly to LinkedIn
-app.post('/api/upload-image-linkedin', upload.single('image'), async (req, res) => {
+app.post('/upload-image-linkedin', upload.single('image'), async (req, res) => {
   try {
     console.log('📸 Image upload endpoint hit - uploading directly to LinkedIn');
     console.log('📁 Request file:', req.file ? {
@@ -1030,7 +1032,7 @@ app.post('/api/upload-image-linkedin', upload.single('image'), async (req, res) 
 });
 
 // ✅ API endpoint to upload video directly to LinkedIn
-app.post('/api/upload-video', (req, res, next) => {
+app.post('/upload-video', (req, res, next) => {
   uploadVideo.single('video')(req, res, (err) => {
     if (err) {
       console.error('❌ Multer error:', err.message);
@@ -1142,7 +1144,7 @@ app.post('/api/upload-video', (req, res, next) => {
 });
 
 // ✅ API endpoint to get LinkedIn user info
-app.get('/api/linkedin-userinfo', async (req, res) => {
+app.get('/linkedin-userinfo', async (req, res) => {
   try {
     const userInfo = await getLinkedInUserInfo();
     res.json({
@@ -1160,7 +1162,7 @@ app.get('/api/linkedin-userinfo', async (req, res) => {
 });
 
 // ✅ API endpoint to post to LinkedIn
-app.post('/api/post-to-linkedin', async (req, res) => {
+app.post('/post-to-linkedin', async (req, res) => {
   try {
     const { 
       content, 
@@ -1382,7 +1384,7 @@ app.post('/api/post-to-linkedin', async (req, res) => {
 });
 
 // ✅ API endpoint to save post without posting to LinkedIn
-app.post('/api/save-post', async (req, res) => {
+app.post('/save-post', async (req, res) => {
   try {
     const { 
       content, 
@@ -1448,7 +1450,7 @@ app.post('/api/save-post', async (req, res) => {
 // ===== REVIEWS API ENDPOINTS =====
 
 // ✅ Get all active reviews
-app.get('/api/reviews', async (req, res) => {
+app.get('/reviews', async (req, res) => {
   try {
     const reviews = await Review.find({ isActive: true }).sort({ order: 1, createdAt: -1 });
     res.json({
@@ -1466,7 +1468,7 @@ app.get('/api/reviews', async (req, res) => {
 });
 
 // ✅ Get all reviews (including inactive - for admin)
-app.get('/api/reviews/all', async (req, res) => {
+app.get('/reviews/all', async (req, res) => {
   try {
     const reviews = await Review.find().sort({ order: 1, createdAt: -1 });
     res.json({
@@ -1484,7 +1486,7 @@ app.get('/api/reviews/all', async (req, res) => {
 });
 
 // ✅ Create a new review
-app.post('/api/reviews', async (req, res) => {
+app.post('/reviews', async (req, res) => {
   try {
     const { name, role, content, type, mediaUrl, imageUrl, order, isActive } = req.body;
 
@@ -1534,7 +1536,7 @@ app.post('/api/reviews', async (req, res) => {
 });
 
 // ✅ Update a review
-app.put('/api/reviews/:id', async (req, res) => {
+app.put('/reviews/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { name, role, content, type, mediaUrl, imageUrl, order, isActive } = req.body;
@@ -1584,7 +1586,7 @@ app.put('/api/reviews/:id', async (req, res) => {
 });
 
 // ✅ Delete a review
-app.delete('/api/reviews/:id', async (req, res) => {
+app.delete('/reviews/:id', async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -1613,7 +1615,7 @@ app.delete('/api/reviews/:id', async (req, res) => {
 });
 
 // ✅ Toggle review active status
-app.patch('/api/reviews/:id/toggle', async (req, res) => {
+app.patch('/reviews/:id/toggle', async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -1648,7 +1650,7 @@ app.patch('/api/reviews/:id/toggle', async (req, res) => {
 // ===== TEAM MEMBERS API ENDPOINTS =====
 
 // ✅ Get all active team members
-app.get('/api/team-members', async (req, res) => {
+app.get('/team-members', async (req, res) => {
   try {
     const teamMembers = await TeamMember.find({ isActive: true }).sort({ order: 1, createdAt: -1 });
     res.json({
@@ -1666,7 +1668,7 @@ app.get('/api/team-members', async (req, res) => {
 });
 
 // ✅ Get all team members (including inactive - for admin)
-app.get('/api/team-members/all', async (req, res) => {
+app.get('/team-members/all', async (req, res) => {
   try {
     const teamMembers = await TeamMember.find().sort({ order: 1, createdAt: -1 });
     res.json({
@@ -1684,7 +1686,7 @@ app.get('/api/team-members/all', async (req, res) => {
 });
 
 // ✅ Create a new team member
-app.post('/api/team-members', async (req, res) => {
+app.post('/team-members', async (req, res) => {
   try {
     const { name, title, experience, image, order, isActive } = req.body;
 
@@ -1724,7 +1726,7 @@ app.post('/api/team-members', async (req, res) => {
 });
 
 // ✅ Update a team member
-app.put('/api/team-members/:id', async (req, res) => {
+app.put('/team-members/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { name, title, experience, image, order, isActive } = req.body;
@@ -1764,7 +1766,7 @@ app.put('/api/team-members/:id', async (req, res) => {
 });
 
 // ✅ Delete a team member
-app.delete('/api/team-members/:id', async (req, res) => {
+app.delete('/team-members/:id', async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -1793,7 +1795,7 @@ app.delete('/api/team-members/:id', async (req, res) => {
 });
 
 // ✅ Toggle team member active status
-app.patch('/api/team-members/:id/toggle', async (req, res) => {
+app.patch('/team-members/:id/toggle', async (req, res) => {
   try {
     const { id } = req.params;
 
