@@ -60,8 +60,7 @@ app.use(cors({
   origin: [
     'https://satocc-coral.vercel.app',
     'http://localhost:3000',
-    'https://satocci.com',
-    'https://api.satocci.com',
+    'https://satocci.com'
   ],
   credentials: true
 }));
@@ -69,7 +68,7 @@ app.use(bodyParser.json());
 
 // ✅ LinkedIn API Configuration
 const LINKEDIN_CONFIG = {
-  accessToken: 'AQW7XJBKTyD--kaCNFOIH9xEQkwXMLI5fH7NuSYAmQJOOMXgFawuXNToYnDBl98fZP1RUnNVjiq7MjH5t71X-29XZE2mBLsUeg9nPGMQtkLv-r-YK4HjMjVJSQQQtXDw-408GFRTdKDnvJ-lIm27Ry51-bGa6_5RtVsbnBi3d5ZiqgqCQd_oZI0OZqgtf9xXoAa4RNHTViZrt6yKEROSsHz62GZ3OimKpb09Utg55APCkBMC6Eo7HM6CrWlMyZJPAi25yLTaDsBDj3JnsAXg5gXb6Gf9fIK-V-XctGV6TikOEh4446aWUB8_ip17NFE5IO5E6EsdJvPjMT6caSOdKx7mMSkceA'
+  accessToken: 'AQX6Wl15nFb0wIQb3PEL8e8GaONeK8Ch1pXwMWCL2Wg7mA_SWRroGNl83GlwBoChKkQy6vwDRvgjbK_PO3WMEktyHHJkJVqVx840HER5wskvuQbaaSAA9TzPAdKfNiaChGZK5GgpUlqXb7s4uBml8BnmTr8FQ_UzKEWr5-yxZEwUv872gHucUtEnMSwfD_FKTfeVvefNm8mDt_a2gvmNZJLuKxMU2xnN-5Aaqj56UGBljrtz0hlH3355KjAZFbugYg02K-dis9JeoosQsdCTgYpcEQSwgY7oYaN6AIcVxwzs40XK05SgbkY4X0PAWlin8D188ujicVo4WdrtWc92AA0d1DgKBw'
 };
 
 
@@ -663,7 +662,7 @@ const GOOGLE_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwX6sBx2LCfMH
 
 
 // ✅ API endpoint to submit form data (Retailer signup)
-app.post('/submit-form', async (req, res) => {
+app.post('/api/submit-form', async (req, res) => {
   try {
     const { fullName, address, email, phone, companyUrl, pos, dailyCustomers } = req.body;
 
@@ -712,7 +711,7 @@ app.post('/submit-form', async (req, res) => {
 // ✅ Newsletter subscription endpoint
 // This collects an email and forwards it to the same Google Apps Script,
 // which can be configured to notify info@satocci.com or store in a sheet.
-app.post('/newsletter', async (req, res) => {
+app.post('/api/newsletter', async (req, res) => {
   try {
     const { email } = req.body;
 
@@ -780,7 +779,7 @@ const setCachedPosts = (cacheKey, data) => {
 };
 
 // ✅ API endpoint to get all posts with pagination support (OPTIMIZED)
-app.get('/posts', async (req, res) => {
+app.get('/api/posts', async (req, res) => {
   try {
     // Parse query parameters
     const page = parseInt(req.query.page) || 1;
@@ -857,7 +856,7 @@ app.get('/posts', async (req, res) => {
 
 
 // ✅ Simple test endpoint
-app.get('/test', (req, res) => {
+app.get('/api/test', (req, res) => {
   res.json({
     success: true,
     message: 'API is working!',
@@ -869,7 +868,7 @@ app.get('/test', (req, res) => {
 });
 
 // ✅ API endpoint to upload image to Cloudinary
-app.post('/upload-image', upload.single('image'), async (req, res) => {
+app.post('/api/upload-image', upload.single('image'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({
@@ -931,7 +930,7 @@ app.post('/upload-image', upload.single('image'), async (req, res) => {
 });
 
 // ✅ API endpoint to upload image directly to LinkedIn
-app.post('/upload-image-linkedin', upload.single('image'), async (req, res) => {
+app.post('/api/upload-image-linkedin', upload.single('image'), async (req, res) => {
   try {
     console.log('📸 Image upload endpoint hit - uploading directly to LinkedIn');
     console.log('📁 Request file:', req.file ? {
@@ -1032,7 +1031,7 @@ app.post('/upload-image-linkedin', upload.single('image'), async (req, res) => {
 });
 
 // ✅ API endpoint to upload video directly to LinkedIn
-app.post('/upload-video', (req, res, next) => {
+app.post('/api/upload-video', (req, res, next) => {
   uploadVideo.single('video')(req, res, (err) => {
     if (err) {
       console.error('❌ Multer error:', err.message);
@@ -1144,7 +1143,7 @@ app.post('/upload-video', (req, res, next) => {
 });
 
 // ✅ API endpoint to get LinkedIn user info
-app.get('/linkedin-userinfo', async (req, res) => {
+app.get('/api/linkedin-userinfo', async (req, res) => {
   try {
     const userInfo = await getLinkedInUserInfo();
     res.json({
@@ -1162,7 +1161,7 @@ app.get('/linkedin-userinfo', async (req, res) => {
 });
 
 // ✅ API endpoint to post to LinkedIn
-app.post('/post-to-linkedin', async (req, res) => {
+app.post('/api/post-to-linkedin', async (req, res) => {
   try {
     const { 
       content, 
@@ -1384,7 +1383,7 @@ app.post('/post-to-linkedin', async (req, res) => {
 });
 
 // ✅ API endpoint to save post without posting to LinkedIn
-app.post('/save-post', async (req, res) => {
+app.post('/api/save-post', async (req, res) => {
   try {
     const { 
       content, 
@@ -1450,7 +1449,7 @@ app.post('/save-post', async (req, res) => {
 // ===== REVIEWS API ENDPOINTS =====
 
 // ✅ Get all active reviews
-app.get('/reviews', async (req, res) => {
+app.get('/api/reviews', async (req, res) => {
   try {
     const reviews = await Review.find({ isActive: true }).sort({ order: 1, createdAt: -1 });
     res.json({
@@ -1468,7 +1467,7 @@ app.get('/reviews', async (req, res) => {
 });
 
 // ✅ Get all reviews (including inactive - for admin)
-app.get('/reviews/all', async (req, res) => {
+app.get('/api/reviews/all', async (req, res) => {
   try {
     const reviews = await Review.find().sort({ order: 1, createdAt: -1 });
     res.json({
@@ -1486,7 +1485,7 @@ app.get('/reviews/all', async (req, res) => {
 });
 
 // ✅ Create a new review
-app.post('/reviews', async (req, res) => {
+app.post('/api/reviews', async (req, res) => {
   try {
     const { name, role, content, type, mediaUrl, imageUrl, order, isActive } = req.body;
 
@@ -1536,7 +1535,7 @@ app.post('/reviews', async (req, res) => {
 });
 
 // ✅ Update a review
-app.put('/reviews/:id', async (req, res) => {
+app.put('/api/reviews/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { name, role, content, type, mediaUrl, imageUrl, order, isActive } = req.body;
@@ -1586,7 +1585,7 @@ app.put('/reviews/:id', async (req, res) => {
 });
 
 // ✅ Delete a review
-app.delete('/reviews/:id', async (req, res) => {
+app.delete('/api/reviews/:id', async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -1615,7 +1614,7 @@ app.delete('/reviews/:id', async (req, res) => {
 });
 
 // ✅ Toggle review active status
-app.patch('/reviews/:id/toggle', async (req, res) => {
+app.patch('/api/reviews/:id/toggle', async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -1650,7 +1649,7 @@ app.patch('/reviews/:id/toggle', async (req, res) => {
 // ===== TEAM MEMBERS API ENDPOINTS =====
 
 // ✅ Get all active team members
-app.get('/team-members', async (req, res) => {
+app.get('/api/team-members', async (req, res) => {
   try {
     const teamMembers = await TeamMember.find({ isActive: true }).sort({ order: 1, createdAt: -1 });
     res.json({
@@ -1668,7 +1667,7 @@ app.get('/team-members', async (req, res) => {
 });
 
 // ✅ Get all team members (including inactive - for admin)
-app.get('/team-members/all', async (req, res) => {
+app.get('/api/team-members/all', async (req, res) => {
   try {
     const teamMembers = await TeamMember.find().sort({ order: 1, createdAt: -1 });
     res.json({
@@ -1686,7 +1685,7 @@ app.get('/team-members/all', async (req, res) => {
 });
 
 // ✅ Create a new team member
-app.post('/team-members', async (req, res) => {
+app.post('/api/team-members', async (req, res) => {
   try {
     const { name, title, experience, image, order, isActive } = req.body;
 
@@ -1726,7 +1725,7 @@ app.post('/team-members', async (req, res) => {
 });
 
 // ✅ Update a team member
-app.put('/team-members/:id', async (req, res) => {
+app.put('/api/team-members/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { name, title, experience, image, order, isActive } = req.body;
@@ -1766,7 +1765,7 @@ app.put('/team-members/:id', async (req, res) => {
 });
 
 // ✅ Delete a team member
-app.delete('/team-members/:id', async (req, res) => {
+app.delete('/api/team-members/:id', async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -1795,7 +1794,7 @@ app.delete('/team-members/:id', async (req, res) => {
 });
 
 // ✅ Toggle team member active status
-app.patch('/team-members/:id/toggle', async (req, res) => {
+app.patch('/api/team-members/:id/toggle', async (req, res) => {
   try {
     const { id } = req.params;
 
