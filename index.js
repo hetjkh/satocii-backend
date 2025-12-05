@@ -675,7 +675,7 @@ app.post('/submit-form', async (req, res) => {
     }
 
     const formData = new URLSearchParams({
-      fullName,
+      name: fullName, // Map fullName to name for Google Sheets
       address: address || '',
       email,
       phone,
