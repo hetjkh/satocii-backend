@@ -658,13 +658,13 @@ async function postToLinkedIn(content, options = {}) {
 }
 
 // ✅ Google Apps Script Web App URL
-const GOOGLE_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwX6sBx2LCfMH_fYgjmXoQY_sswvUptgOA-Jk8JT4rkXhMW6PjGbsqXQ70QlZ4Yf1Vh/exec';
+const GOOGLE_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycby08X9QnUg6b7ciwEzcsp8fzPDN0YEigUYiUU6oXS3On_SVFucyrR66TQppRq6ZcYKNZw/exec';
 
 
 // ✅ API endpoint to submit form data (Retailer signup)
 app.post('/api/submit-form', async (req, res) => {
   try {
-    const { fullName, address, email, phone, companyUrl, pos, dailyCustomers } = req.body;
+    const { fullName, storeName, address, email, phone, companyUrl, pos, dailyCustomers } = req.body;
 
     if (!fullName || !email || !phone) {
       return res.status(400).json({
@@ -674,13 +674,13 @@ app.post('/api/submit-form', async (req, res) => {
     }
 
     const formData = new URLSearchParams({
-      name: fullName, // Map fullName to name for Google Sheets
-      address: address || '',
-      email,
-      phone,
-      companyUrl: companyUrl || '',
-      pos: pos || '',
-      dailyCustomers: dailyCustomers || ''
+      fullname: fullName, // Matches sheet header 'fullname'
+      Address: address || '', // Matches sheet header 'Address' (capital A)
+      Email: email, // Matches sheet header 'Email' (capital E)
+      Phone: phone, // Matches sheet header 'Phone' (capital P)
+      'Company URL': companyUrl || '', // Matches sheet header 'Company URL' (with space)
+      POS: pos || '', // Matches sheet header 'POS' (all caps)
+      'Daily Customers': dailyCustomers || '' // Matches sheet header 'Daily Customers' (with space)
     }).toString();
 
     const response = await axios.post(GOOGLE_SCRIPT_URL, formData, {
